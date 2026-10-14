@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -588,6 +590,9 @@ int eaPhoneOrganizeCar(Model& car, const std::string& carName,
     std::string livery = find("texture_car_" + carName + "_livery.m3g");
     std::string spoilers = find("texture_spoilers.m3g");
     std::string vinyls = find("texture_vinyls_01.m3g");
+    // Shift 2: the exhausts (options 1020-1029, and the pipes every car has)
+    // are drawn from texture_car_<car>_exhaust
+    std::string exhaust = find("texture_car_" + carName + "_exhaust.m3g");
     if (stock.empty()) stock = find("texture_civilian_and_cop_mastertexture.m3g");
     if (kit.empty()) kit = stock;
 
@@ -599,17 +604,21 @@ int eaPhoneOrganizeCar(Model& car, const std::string& carName,
         if (m.bboxMax[1] - m.bboxMin[1] < 1e-3f) { m.lod = "HELPERS"; continue; }   // the shadow cards
         uidsOf[appOf(m)].insert(uid);
     }
-    enum Role { CAR, BODYKIT, LIVERY, SPOILERS, VINYL };
+    enum Role { CAR, BODYKIT, LIVERY, SPOILERS, VINYL, EXHAUST };
     std::map<int, Role> role;
     for (auto& kv : uidsOf) {
         const std::set<int>& u = kv.second;
-        bool allShop = true, allVinyl = true;
+        bool allShop = true, allVinyl = true, exhaustOpt = false, allWing = true;
         for (int x : u) {
             if (x < 138 || x > 159) allShop = false;
             if (x != 128 && x != 130) allVinyl = false;
+            if (x >= 1020 && x <= 1029) exhaustOpt = true;
+            if (x < 1001 || x > 1019) allWing = false;
         }
         Role r = CAR;
-        if (!livery.empty() && (u.count(131) || u.count(170) || (u.count(172) && !u.count(22)))) r = LIVERY;
+        if (exhaustOpt && !exhaust.empty()) r = EXHAUST;
+        else if (allWing && !spoilers.empty()) r = SPOILERS;      // Shift 2's wings, 1001-1019
+        else if (!livery.empty() && (u.count(131) || u.count(170) || (u.count(172) && !u.count(22)))) r = LIVERY;
         else if (u.count(25) || u.count(126)) r = BODYKIT;
         else if (allShop && !spoilers.empty()) r = SPOILERS;
         else if (allVinyl && !vinyls.empty()) r = VINYL;
@@ -624,6 +633,9 @@ int eaPhoneOrganizeCar(Model& car, const std::string& carName,
         if (uid < 0 || m.lod == "HELPERS") continue;
         Role r = role[appOf(m)];
         if (r == VINYL) { m.kit = '+'; m.kitSlot = "vinyl"; continue; }
+        // Shift 2: the exhaust appearance's unnumbered cards (the flames and
+        // the heat a pipe gives off) are not body panels; shown with the options
+        if (r == EXHAUST && uid == 0) { m.kit = '+'; m.kitSlot = "exhaust_fx"; continue; }
         if (r == LIVERY && uid != 20) { m.kit = '+'; m.kitSlot = "livery_" + std::to_string(uid); continue; }
         // the wide arches and sills (25, and 126 the second kit's) are body
         // kit parts whatever their number: the car as it ships has none
@@ -661,7 +673,7 @@ int eaPhoneOrganizeCar(Model& car, const std::string& carName,
         if (uid < 0) continue;
         Role r = role.count(appOf(m)) ? role[appOf(m)] : CAR;
         const std::string& t = r == BODYKIT ? kit : r == LIVERY ? livery : r == SPOILERS ? spoilers
-                             : r == VINYL ? vinyls : stock;
+                             : r == VINYL ? vinyls : r == EXHAUST ? exhaust : stock;
         // the decals and badges (20), the livery and the vinyls are cut out
         // of their texture by its alpha; drawn solid the clear parts of the
         // picture show as a rainbow of noise around the letters
@@ -680,7 +692,43 @@ int eaPhoneOrganizeCar(Model& car, const std::string& carName,
 // on the car's left; the right side is their mirror image). Undercover's
 // rims draw from texture_wheels_01 / _02, Shift's from _02 and
 // texture_wheels_generic, Shift 2's newer ones from _03.
-int eaPhoneAttachWheels(Model& car, const Model& wheels, const std::function<std::string(const std::string&)>& find) {
+// Every car of these games has a rim of its own in wheels.m3g: one disc per
+// user ID, drawn from an atlas (61-80 texture_wheels_02, 51-58 and 1101-1120
+// Shift 2's texture_wheels_03; 81-96 are the shop's generic rims). Which one
+// a car wears is the u16 after its eight paint jobs in cars.bin, and which
+// record is which car shows in the paints themselves: their colours match
+// the car's own texture_car_<car>_01 ... _07, record by record. Read that way
+// from Shift's and Shift 2's cars.bin (the VW, BMW, Mercedes, Porsche,
+// Lamborghini, Renault, Lotus and Alfa caps on the rims agree); Undercover's
+// cars.bin names the rim too and the same caps place most of its cars.
+int eaPhoneCarWheel(const std::string& carName) {
+    std::string n = carName;
+    for (char& c : n) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (n.compare(0, 4, "car_") == 0) n.erase(0, 4);
+    if (n.size() > 4 && n.compare(n.size() - 4, 4, ".m3g") == 0) n.erase(n.size() - 4);
+    static const std::map<std::string, int> kWheel = {
+        // NFS Shift (and the same cars in Shift 2)
+        { "golf", 67 }, { "rx8", 72 }, { "evox", 64 }, { "wrx", 61 }, { "shelby", 73 },
+        { "skyline", 68 }, { "cayman", 62 }, { "challenger", 76 }, { "370z", 70 }, { "r8", 79 },
+        { "sl65", 74 }, { "fordgt", 65 }, { "corvette", 69 }, { "gt2", 66 }, { "gallardo", 78 },
+        { "murcielago", 77 }, { "zondaf", 75 }, { "dbr9", 71 }, { "mc12", 80 }, { "m3e92", 63 },
+        // NFS Shift 2 Unleashed
+        { "audir8lms", 53 }, { "veyron", 52 }, { "gt3rsr", 57 }, { "gtrr35", 58 }, { "carrera", 56 },
+        { "ccx", 54 }, { "lfa", 51 }, { "c9", 55 }, { "911gt3r", 56 }, { "s14", 1110 },
+        { "gtrgt1", 71 }, { "jaguar", 1119 }, { "megane", 1115 }, { "exige", 1116 }, { "huayra", 1111 },
+        { "competizione", 1114 }, { "z4gt3", 1112 }, { "apollo", 53 }, { "granturismo", 1113 },
+        { "tc", 1117 }, { "supra", 1120 }, { "vipersrt10", 1118 },
+        // NFS Undercover (its own atlas: the same IDs, other rims)
+        { "240sx", 61 }, { "300c", 71 }, { "350zse", 79 }, { "67mustang", 70 }, { "carreragt", 62 },
+        { "firebird", 70 }, { "gtr", 68 }, { "lancerevox", 64 }, { "m3", 63 }, { "mazda3", 69 },
+        { "mustanggt", 73 }, { "sl65amg", 74 }, { "solstice", 77 }, { "viper", 76 },
+    };
+    auto it = kWheel.find(n);
+    return it == kWheel.end() ? -1 : it->second;
+}
+
+int eaPhoneAttachWheels(Model& car, const Model& wheels, const std::function<std::string(const std::string&)>& find,
+                        const std::string& carName, int* uidOut) {
     const Hardpoint* front = nullptr;
     const Hardpoint* rear = nullptr;
     for (const Hardpoint& h : car.points) {
@@ -692,12 +740,16 @@ int eaPhoneAttachWheels(Model& car, const Model& wheels, const std::function<std
     std::map<int, std::vector<const Mesh*>> byUid;
     for (const Mesh& m : wheels.meshes) if (uidOf(m) >= 0) byUid[uidOf(m)].push_back(&m);
     if (byUid.empty()) return 0;
-    int pick = byUid.count(81) ? 81 : byUid.begin()->first;
+    // the car's own rim; Shift's generic one (81), or the first, when the car is not known
+    int own = eaPhoneCarWheel(carName);
+    int pick = own >= 0 && byUid.count(own) ? own : byUid.count(81) ? 81 : byUid.begin()->first;
+    if (uidOut) *uidOut = pick;
     auto texFor = [&](int uid) -> std::string {
         if (uid >= 1100) return firstFound(find, { "texture_wheels_03.m3g", "texture_wheels_genericnew01.m3g" });
         if (uid >= 81) return firstFound(find, { "texture_wheels_generic.m3g", "texture_wheels_02.m3g" });
         if (uid >= 61) return firstFound(find, { "texture_wheels_02.m3g", "texture_wheels_01.m3g" });
-        return firstFound(find, { "texture_wheels_01.m3g", "texture_wheels_02.m3g" });
+        // Shift 2's 51-58 are on texture_wheels_03; Undercover (no _03) keeps 38-54 on _01
+        return firstFound(find, { "texture_wheels_03.m3g", "texture_wheels_01.m3g", "texture_wheels_02.m3g" });
     };
     std::string tex = texFor(pick);
     int placed = 0;
@@ -883,26 +935,30 @@ bool readLayoutAs(const uint8_t* d, size_t n, bool shift, int head, size_t ent, 
 }
 
 bool eaPhoneReadLayout(const uint8_t* d, size_t n, std::vector<EaTile>& tiles) {
-    static const uint8_t kShift[6] = { 0, 0xFF, 0, 0xFF, 0, 0xFF };
-    if (n > 7 && memcmp(d, kShift, 6) == 0)
-        return readLayoutAs(d, n, true, 0, 8, tiles) || readLayoutAs(d, n, true, 2, 9, tiles);
+    // Shift's files mostly open with 00 ff 00 ff 00 ff, but not all of Shift
+    // 2's (locationb_02, locationc_06, the night tracks have other values
+    // there): the Shift reading is tried on every file, it checks itself
+    // (every tile ends in its links block)
+    if (n > 7 && (readLayoutAs(d, n, true, 0, 8, tiles) || readLayoutAs(d, n, true, 2, 9, tiles))) return true;
     return readLayoutAs(d, n, false, 0, 4, tiles);
 }
 
-int eaPhoneLayoutTrack(Model& m, const std::vector<EaTile>& tiles, float unit) {
+namespace {
+int placeTiles(const Model& m, const std::vector<EaTile>& tiles, float unit, bool zMirror, std::vector<Mesh>& out) {
     std::map<int, std::vector<size_t>> byPiece;
     for (size_t i = 0; i < m.meshes.size(); ++i) {
         size_t at = m.meshes[i].name.find("_mesh_");
         if (at == std::string::npos) continue;
         byPiece[atoi(m.meshes[i].name.c_str() + at + 6)].push_back(i);
     }
-    std::vector<Mesh> out;
+    out.clear();
     int placed = 0;
     for (size_t t = 0; t < tiles.size(); ++t) {
         const EaTile& tl = tiles[t];
+        int mirror = zMirror ? tl.mirror : (tl.mirror & 1);
         int rotDeg = tl.rot;
         float a = rotDeg * 3.14159265f / 180.0f, c = std::cos(a), s = std::sin(a);
-        float sx = (tl.mirror & 1) ? -1.0f : 1.0f, sz = (tl.mirror & 2) ? -1.0f : 1.0f;
+        float sx = (mirror & 1) ? -1.0f : 1.0f, sz = (mirror & 2) ? -1.0f : 1.0f;
         for (int piece : tl.pieces) {
             auto it = byPiece.find(piece);
             if (it == byPiece.end()) continue;
@@ -936,7 +992,7 @@ int eaPhoneLayoutTrack(Model& m, const std::vector<EaTile>& tiles, float unit) {
                 };
                 for (size_t k = 0; k + 2 < me.positions.size(); k += 3) turn(&me.positions[k], true);
                 for (size_t k = 0; k + 2 < me.normals.size(); k += 3) turn(&me.normals[k], false);
-                if ((tl.mirror & 1) != (tl.mirror >> 1 & 1))      // a mirrored piece turns its triangles inside out
+                if ((mirror & 1) != (mirror >> 1 & 1))      // a mirrored piece turns its triangles inside out
                     for (size_t k = 0; k + 2 < me.indices.size(); k += 3) std::swap(me.indices[k + 1], me.indices[k + 2]);
                 me.name += "_tile" + std::to_string(t);
                 for (int k = 0; k < 3; ++k) { me.bboxMin[k] = 1e30f; me.bboxMax[k] = -1e30f; }
@@ -949,6 +1005,43 @@ int eaPhoneLayoutTrack(Model& m, const std::vector<EaTile>& tiles, float unit) {
             }
             ++placed;
         }
+    }
+    return placed;
+}
+
+// how well the laid-out pieces meet: the corners (to a unit) that one tile's
+// pieces share with another tile's
+size_t seams(const std::vector<Mesh>& meshes) {
+    std::map<std::pair<long, long>, size_t> owner;     // corner -> tile + 1, or 0 for shared
+    size_t shared = 0;
+    for (const Mesh& me : meshes) {
+        size_t at = me.name.rfind("_tile");
+        size_t tile = at == std::string::npos ? 0 : (size_t)atoi(me.name.c_str() + at + 5) + 1;
+        for (size_t k = 0; k + 2 < me.positions.size(); k += 3) {
+            if (std::fabs(me.positions[k + 1]) > 0.5f) continue;          // the ground only
+            std::pair<long, long> key(std::lround(me.positions[k]), std::lround(me.positions[k + 2]));
+            auto it = owner.find(key);
+            if (it == owner.end()) owner[key] = tile;
+            else if (it->second && it->second != tile) { it->second = 0; ++shared; }
+        }
+    }
+    return shared;
+}
+}
+
+// A tile's mirror: bit 0 mirrors x. Bit 1 mirrors z in Undercover's layouts
+// but means something else in Shift 2's (its tracks only join up without
+// it), so both readings are laid out and the one whose pieces meet is kept.
+int eaPhoneLayoutTrack(Model& m, const std::vector<EaTile>& tiles, float unit) {
+    bool any2 = false;
+    for (const EaTile& t : tiles) if (t.mirror & 2) any2 = true;
+    std::vector<Mesh> out;
+    int placed = placeTiles(m, tiles, unit, true, out);
+    if (any2) {
+        std::vector<Mesh> alt;
+        int placedAlt = placeTiles(m, tiles, unit, false, alt);
+        size_t a = seams(out), b = seams(alt);
+        if (b > a) { out.swap(alt); placed = placedAlt; }
     }
     if (!placed) return 0;
     m.meshes.swap(out);
@@ -1182,8 +1275,10 @@ std::vector<std::string> eaPhoneDress(Model& m, const std::string& stem, const E
         Bytes wb;
         if (!wp.empty() && f.read(wp, wb)) {
             Model w = loadJsr184Scene(wb.data(), wb.size());
-            int k = eaPhoneAttachWheels(m, w, f.find);
-            if (k) said.push_back(std::to_string(k) + " wheel(s) from wheels.m3g");
+            int uid = -1;
+            int k = eaPhoneAttachWheels(m, w, f.find, stem.substr(4), &uid);
+            if (k) said.push_back(std::to_string(k) + " wheel(s) from wheels.m3g (rim " + std::to_string(uid) +
+                                  (eaPhoneCarWheel(stem.substr(4)) == uid ? ", the car's own)" : ", a generic one)"));
         }
         return said;
     }

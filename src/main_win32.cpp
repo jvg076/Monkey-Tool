@@ -101,6 +101,7 @@ enum {
     IDC_ANIMATE,
     IDC_TEXTURED,
     IDC_VCOLORS,
+    IDC_GLOW,
     IDC_TEXTVIEW,
     IDC_PLAY,
     IDC_STOP,
@@ -123,6 +124,14 @@ enum {
     IDC_TB_IMPORT,
     IDC_TB_SAVE,
     IDC_TB_NEWCAR,
+    IDC_TB_CREATOR,
+    IDC_TB_SERIES,
+    IDC_TB_TRACK,
+    IDC_TB_MOD,
+    IDC_TB_POINTS,
+    IDC_TB_ENCODE,
+    IDC_TB_FILTER,
+    IDC_TB_OPTIONS,
     IDC_RIMLABEL,
     IDC_RIMCOMBO,
     IDC_RIMAPPLY,
@@ -135,6 +144,11 @@ enum {
     ID_TOOLS_SAVE_EDITOR,
     ID_TOOLS_SHOW_SOURCE,
     ID_TOOLS_IMPORT,
+    ID_TOOLS_CAR_CREATOR,
+    ID_TOOLS_RACING_SERIES,
+    ID_TOOLS_NEW_TRACK,
+    ID_TOOLS_INSTALL_MOD,
+    ID_TOOLS_EDIT_POINTS,
     ID_FILE_OPEN_PICTURE,
     ID_FILE_CONVERT,
     ID_FILE_EXPORT_SELECTED,
@@ -207,6 +221,155 @@ static HWND g_saveEdBtn, g_tooltip;
 static HWND g_tbOpen, g_tbExport, g_tbImport;
 static HIMAGELIST g_treeImages;
 static HFONT g_treeFont, g_headerFont;
+
+// ---- the tool's own message box, in the theme the user picked (the system
+// one is always light). Every MessageBoxW below goes through it. ----
+static void ttDrawButton(const DRAWITEMSTRUCT* d, bool active);
+static void toolTitleBar(HWND h, bool dark);
+struct MsgBoxState {
+    std::wstring text;
+    HICON icon = nullptr;
+    std::vector<std::pair<HWND, int>> buttons;     // button, result
+    int result = 0, defaultResult = 0, cancelResult = 0;
+    bool done = false;
+    RECT textRect = {0, 0, 0, 0};
+};
+static LRESULT CALLBACK msgBoxProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    MsgBoxState* st = (MsgBoxState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_NCCREATE:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams);
+        break;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HBRUSH b = CreateSolidBrush(pal().windowBg);
+        FillRect((HDC)wp, &rc, b);
+        DeleteObject(b);
+        return 1;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        if (st) {
+            if (st->icon) DrawIconEx(dc, 20, 20, st->icon, 32, 32, 0, nullptr, DI_NORMAL);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, pal().text);
+            HGDIOBJ of = SelectObject(dc, g_treeFont ? g_treeFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            RECT r = st->textRect;
+            DrawTextW(dc, st->text.c_str(), -1, &r, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+            SelectObject(dc, of);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
+        bool isDefault = false;
+        if (st) for (auto& b : st->buttons) if (b.first == d->hwndItem && b.second == st->defaultResult) isDefault = true;
+        ttDrawButton(d, isDefault);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (st) for (auto& b : st->buttons)
+            if ((HWND)lp == b.first) { st->result = b.second; st->done = true; DestroyWindow(hwnd); return 0; }
+        break;
+    case WM_CLOSE:
+        if (st) { st->result = st->cancelResult; st->done = true; }
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+static int themedMessageBox(HWND owner, LPCWSTR text, LPCWSTR caption, UINT type) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = msgBoxProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"MonkeyToolMessage";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    MsgBoxState st;
+    st.text = text ? text : L"";
+    UINT kind = type & 0x0F, iconKind = type & 0xF0;
+    std::vector<std::pair<const wchar_t*, int>> labels;
+    switch (kind) {
+    case MB_OKCANCEL:        labels = { {L"OK", IDOK}, {L"Cancel", IDCANCEL} }; st.cancelResult = IDCANCEL; break;
+    case MB_YESNOCANCEL:     labels = { {L"Yes", IDYES}, {L"No", IDNO}, {L"Cancel", IDCANCEL} }; st.cancelResult = IDCANCEL; break;
+    case MB_YESNO:           labels = { {L"Yes", IDYES}, {L"No", IDNO} }; st.cancelResult = IDNO; break;
+    case MB_RETRYCANCEL:     labels = { {L"Retry", IDRETRY}, {L"Cancel", IDCANCEL} }; st.cancelResult = IDCANCEL; break;
+    default:                 labels = { {L"OK", IDOK} }; st.cancelResult = IDOK; break;
+    }
+    size_t def = (type & MB_DEFBUTTON3) ? 2 : (type & MB_DEFBUTTON2) ? 1 : 0;
+    if (def >= labels.size()) def = 0;
+    st.defaultResult = labels[def].second;
+    LPCWSTR iconId = iconKind == MB_ICONERROR ? IDI_ERROR : iconKind == MB_ICONWARNING ? IDI_WARNING :
+                     iconKind == MB_ICONQUESTION ? IDI_QUESTION : iconKind == MB_ICONINFORMATION ? IDI_INFORMATION : nullptr;
+    if (iconId) st.icon = LoadIcon(nullptr, iconId);
+    if (iconKind == MB_ICONERROR) MessageBeep(MB_ICONERROR);
+    else if (iconKind == MB_ICONWARNING) MessageBeep(MB_ICONWARNING);
+
+    // measure the text: up to 520 px wide
+    HDC sdc = GetDC(nullptr);
+    HGDIOBJ of = SelectObject(sdc, g_treeFont ? g_treeFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+    RECT tr = { 0, 0, 520, 0 };
+    DrawTextW(sdc, st.text.c_str(), -1, &tr, DT_CALCRECT | DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+    SelectObject(sdc, of);
+    ReleaseDC(nullptr, sdc);
+    int textX = st.icon ? 68 : 24, btnW = 92, btnH = 30, gap = 8;
+    int btnRow = (int)labels.size() * btnW + ((int)labels.size() - 1) * gap;
+    int cw = std::max(textX + (int)(tr.right - tr.left) + 24, btnRow + 48);
+    cw = std::max(cw, 300);
+    int textH = std::max((int)(tr.bottom - tr.top), st.icon ? 32 : 0);
+    int ch = 22 + textH + 22 + btnH + 18;
+    st.textRect = { textX, 22, cw - 20, 22 + textH + 4 };
+    RECT wr = { 0, 0, cw, ch };
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME;
+    AdjustWindowRectEx(&wr, style, FALSE, ex);
+    int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
+    RECT pr;
+    HWND parent = owner && IsWindow(owner) ? owner : nullptr;
+    if (parent) GetWindowRect(parent, &pr);
+    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &pr, 0);
+    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 3;
+    HWND hwnd = CreateWindowExW(ex, L"MonkeyToolMessage", caption ? caption : L"Monkey Tool", style,
+                                x, y, ww, wh, parent, nullptr, GetModuleHandleW(nullptr), &st);
+    if (!hwnd) return st.cancelResult;
+    toolTitleBar(hwnd, g_dark);
+    int bx = cw - 20 - btnRow, by = ch - 18 - btnH;
+    for (size_t i = 0; i < labels.size(); ++i) {
+        HWND b = CreateWindowExW(0, L"BUTTON", labels[i].first, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                 bx + (int)i * (btnW + gap), by, btnW, btnH, hwnd, (HMENU)(INT_PTR)(100 + i),
+                                 GetModuleHandleW(nullptr), nullptr);
+        SendMessageW(b, WM_SETFONT, (WPARAM)(g_headerFont ? g_headerFont : GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+        st.buttons.push_back({ b, labels[i].second });
+    }
+    if (parent) EnableWindow(parent, FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    SetFocus(st.buttons[def].first);
+    MSG m;
+    while (!st.done && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN && (m.hwnd == hwnd || IsChild(hwnd, m.hwnd))) {
+            if (m.wParam == VK_ESCAPE) { st.result = st.cancelResult; st.done = true; DestroyWindow(hwnd); break; }
+            if (m.wParam == VK_RETURN) {
+                int r = st.defaultResult;
+                HWND f = GetFocus();
+                for (auto& b : st.buttons) if (b.first == f) r = b.second;
+                st.result = r; st.done = true; DestroyWindow(hwnd); break;
+            }
+        }
+        if (IsDialogMessageW(hwnd, &m)) continue;
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    if (parent) { EnableWindow(parent, TRUE); SetActiveWindow(parent); }
+    if (IsWindow(hwnd)) DestroyWindow(hwnd);
+    return st.result ? st.result : st.cancelResult;
+}
+#define MessageBoxW themedMessageBox
 static const nfsnl::Image* resourceImage(int id);
 static int treeIconFor(const std::string& path);
 static void drawImageAlpha(HDC hdc, const nfsnl::Image& img, int x, int y, int w, int h, COLORREF over);
@@ -270,7 +433,8 @@ static std::map<std::string, nfsnl::Image> g_texOverride;
 // wrapper), by asset path.
 struct PendingSave { size_t entry = 0; Bytes bytes; std::string what; };
 static std::map<std::string, PendingSave> g_pending;
-static HWND g_tbSave, g_tbNewCar;
+static HWND g_tbSave, g_tbNewCar, g_tbCreator, g_tbSeries;
+static HWND g_tbTrack, g_tbMod, g_tbPoints, g_tbEncode, g_tbFilter, g_tbOptions;
 static void updateToolbarState();
 static nfsnl::Image g_viewFrame;
 static bool g_viewActive = false;
@@ -298,6 +462,7 @@ static void glUploadShaders();
 static RECT g_viewRect{};        // where the model is drawn
 static RECT g_viewBarRect{};     // the strip of controls under it
 static HWND g_posLabel, g_posX, g_posY, g_posZ, g_lodCombo, g_resetBtn, g_texCheck, g_vcolCheck;
+static HWND g_glowCheck;    // the cars' light glow cards (headlight beams on the road), off by default
 static HWND g_kitCombo;          // body kit: Stock, All parts, Kit B ...
 static HWND g_paintCombo;        // NFS Shift / Undercover: the car's paint (texture_car_<name>_01 ...)
 // No Limits rim paint, under a wheel texture: CAR COLOR [the game's rim
@@ -510,13 +675,10 @@ static void applyTheme() {
         InvalidateRect(g_tree, nullptr, TRUE);
     }
     if (g_main) {
-        HMENU m = GetMenu(g_main);
-        if (m) {
-            CheckMenuRadioItem(m, ID_THEME_LIGHT, ID_THEME_DARK,
-                               g_dark ? ID_THEME_DARK : ID_THEME_LIGHT, MF_BYCOMMAND);
-            themeMenu(m, true);
-            DrawMenuBar(g_main);
-        }
+        // no menu bar: the toolbar's icons repaint on the new background
+        for (HWND b : { g_tbOpen, g_tbExport, g_tbImport, g_tbSave, g_tbCreator, g_tbSeries, g_tbTrack,
+                        g_tbMod, g_tbPoints, g_tbEncode, g_tbFilter, g_tbOptions })
+            if (b) InvalidateRect(b, nullptr, TRUE);
         InvalidateRect(g_main, nullptr, TRUE);
     }
     if (g_status) InvalidateRect(g_status, nullptr, TRUE);
@@ -533,7 +695,7 @@ static void applyTheme() {
         // A themed check box draws its label in the theme's own (black)
         // colour whatever WM_CTLCOLORSTATIC says, which is why "Textures"
         // vanished on the dark pane; unthemed, it takes the colour given.
-        for (HWND c : { g_texCheck, g_vcolCheck })
+        for (HWND c : { g_texCheck, g_vcolCheck, g_glowCheck })
             if (c) { SetWindowTheme(c, L"", L""); InvalidateRect(c, nullptr, TRUE); }
     }
     g_view.background[0] = (float)GetRValue(pal().previewBg);
@@ -841,6 +1003,7 @@ static void showViewerControls(bool show) {
     ShowWindow(g_resetBtn, cmd);
     ShowWindow(g_texCheck, cmd);
     ShowWindow(g_vcolCheck, cmd);
+    ShowWindow(g_glowCheck, cmd);
     ShowWindow(g_kitCombo, show && !g_kitLetters.empty() ? SW_SHOW : SW_HIDE);
     ShowWindow(g_paintCombo, show && SendMessageW(g_paintCombo, CB_GETCOUNT, 0, 0) > 1 ? SW_SHOW : SW_HIDE);
     ShowWindow(g_animBtn, show && nfsnl::modelAnimDuration(g_viewModel) > 0 ? SW_SHOW : SW_HIDE);
@@ -1576,6 +1739,7 @@ static void openViewer(nfsnl::Model&& m) {
     // the two shading toggles stay as the user left them, model to model
     g_view.textured = SendMessageW(g_texCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     g_view.vertexColors = SendMessageW(g_vcolCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    g_view.hideGlow = SendMessageW(g_glowCheck, BM_GETCHECK, 0, 0) != BST_CHECKED;
     const Palette& p = pal();
     g_view.background[0] = (float)GetRValue(p.previewBg);
     g_view.background[1] = (float)GetGValue(p.previewBg);
@@ -1685,7 +1849,8 @@ static void glUploadShaders() {
             bool f = loadRamp("fresnel_" + sh + ".rgb.pvr", fr);
             bool p = loadRamp("spec_" + sh + ".rgb.pvr", sp);
             if (!f && !p) { missing[sh] = true; continue; }
-            nfsnl::Image mc = nfsnl::rr3ShaderMatcap(f ? &fr : nullptr, p ? &sp : nullptr, 128);
+            nfsnl::Image mc = nfsnl::rr3ShaderMatcap(f ? &fr : nullptr, p ? &sp : nullptr, 128,
+                                                     nfsnl::rr3ShaderStrength(sh));
             wglMakeCurrent(g_glDC, g_glRC);
             GLuint t = 0;
             glGenTextures(1, &t);
@@ -1708,11 +1873,13 @@ static void glUploadShaders() {
     }
 }
 
+static bool g_glListsTextured = true;       // the lists bake the cockpit light only when textured
 static void glBuildLists() {
     if (g_glLists) glDeleteLists(g_glLists, (GLsizei)g_glListCount);
     g_glListCount = g_viewModel.meshes.size();
     g_glLists = g_glListCount ? glGenLists((GLsizei)g_glListCount) : 0;
     g_glListsWithColour = g_view.vertexColors;
+    g_glListsTextured = g_view.textured;
     for (size_t i = 0; i < g_glListCount && g_glLists; ++i) {
         const nfsnl::Mesh& m = g_viewModel.meshes[i];
         size_t nv = m.positions.size() / 3;
@@ -1723,9 +1890,26 @@ static void glBuildLists() {
             bool n = m.normals.size() == m.positions.size();
             bool t = m.uvs.size() / 2 == nv;
             bool c = g_glListsWithColour && m.colors.size() == nv * 4;
+            // a cockpit's baked light (and the vertex colours, when shown)
+            // as one colour array; untextured parts carry their colour in it
+            std::vector<float> lit;
+            if (g_glListsTextured && m.light.size() == nv) {
+                float base[3] = { 1, 1, 1 };
+                if (m.texture.empty()) {
+                    bool own = m.color[0] != 1 || m.color[1] != 1 || m.color[2] != 1;
+                    for (int k = 0; k < 3; ++k) base[k] = own ? m.color[k] : 0.76f;
+                }
+                lit.resize(nv * 4);
+                for (size_t v = 0; v < nv; ++v) {
+                    float L = m.light[v];
+                    for (int k = 0; k < 3; ++k) lit[v * 4 + k] = base[k] * L * (c ? m.colors[v * 4 + k] : 1.0f);
+                    lit[v * 4 + 3] = c ? m.colors[v * 4 + 3] : 1.0f;
+                }
+                c = true;
+            }
             if (n) { glEnableClientState(GL_NORMAL_ARRAY); glNormalPointer(GL_FLOAT, 0, m.normals.data()); }
             if (t) { glEnableClientState(GL_TEXTURE_COORD_ARRAY); glTexCoordPointer(2, GL_FLOAT, 0, m.uvs.data()); }
-            if (c) { glEnableClientState(GL_COLOR_ARRAY); glColorPointer(4, GL_FLOAT, 0, m.colors.data()); }
+            if (c) { glEnableClientState(GL_COLOR_ARRAY); glColorPointer(4, GL_FLOAT, 0, lit.empty() ? m.colors.data() : lit.data()); }
             glDrawElements(GL_TRIANGLES, (GLsizei)m.indices.size(), GL_UNSIGNED_INT, m.indices.data());
             glDisableClientState(GL_VERTEX_ARRAY);
             if (n) glDisableClientState(GL_NORMAL_ARRAY);
@@ -1769,7 +1953,8 @@ static void glPaint() {
     glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     if (!g_viewActive) { SwapBuffers(g_glDC); return; }
-    if (g_glListsDirty || g_glListsWithColour != g_view.vertexColors) glBuildLists();
+    if (g_glListsDirty || g_glListsWithColour != g_view.vertexColors || g_glListsTextured != g_view.textured)
+        glBuildLists();
 
     // ---- sky ----
     glDisable(GL_DEPTH_TEST);
@@ -1895,7 +2080,11 @@ static void glPaint() {
         if (mode == nfsnl::ALPHA_CUTOUT) glEnable(GL_ALPHA_TEST); else glDisable(GL_ALPHA_TEST);
         float a = alphaOf[i];
         int ti = texOf[i];
-        if (ti >= 0) {
+        if (m.lod == "HELPERS") ti = -1;
+        if (m.lod == "HELPERS") {
+            glDisable(GL_TEXTURE_2D);
+            glColor4f(nfsnl::kHelperColour[0], nfsnl::kHelperColour[1], nfsnl::kHelperColour[2], a);
+        } else if (ti >= 0) {
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, g_glTex[ti]);
             glColor4f(1, 1, 1, a);
@@ -3544,11 +3733,7 @@ static const std::vector<std::pair<std::string, std::string>>& commonTextures() 
 
 // <car>.liveries.bin(.nct): the car's texture table
 static bool readCarLiveries(const std::string& modelPath, nfsnl::NctLiveries& out) {
-    std::string car = nfsnl::stripExtension(nfsnl::baseName(modelPath));
-    for (char& c : car) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    if (car.size() > 2 && car[car.size() - 2] == '_') car.erase(car.size() - 2);
-    if (car.size() > 4 && car.compare(car.size() - 4, 4, "_int") == 0) car.erase(car.size() - 4);
-    std::string want = car + ".liveries";
+    std::string want = nfsnl::rr3CarNameFor(modelPath) + ".liveries";
     for (size_t i = 0; i < g_all.size(); ++i) {
         std::string leaf = nfsnl::baseName(g_all[i].path);
         for (char& c : leaf) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
@@ -3563,10 +3748,37 @@ static bool readCarLiveries(const std::string& modelPath, nfsnl::NctLiveries& ou
 }
 
 // the cockpit's .points beside an exterior model, for the steering wheel
+static bool readLibraryFile(const std::string& want, Bytes& out);
 static bool readInteriorPoints(const std::string& modelPath, Bytes& out) {
     out.clear();
     if (nfsnl::extensionOf(modelPath) != "m3g") return false;
-    std::string want = nfsnl::rr3InteriorPointsNameFor(modelPath);
+    return readLibraryFile(nfsnl::rr3InteriorPointsNameFor(modelPath), out);
+}
+
+// the cockpit model beside an exterior model, for where its wheel sits
+static bool readInteriorModel(const std::string& modelPath, Bytes& out) {
+    out.clear();
+    if (nfsnl::extensionOf(modelPath) != "m3g") return false;
+    return readLibraryFile(nfsnl::rr3InteriorModelNameFor(modelPath), out);
+}
+
+// a library file as it is stored: a Real Racing 3 .bin chain keeps all its
+// frames (the library entry itself shows the first)
+static bool readStoredFile(const std::string& entryPath, Bytes& out) {
+    out.clear();
+    for (size_t i = 0; i < g_all.size(); ++i) {
+        if (g_all[i].path != entryPath) continue;
+        const nfsnl::LibraryEntry& le = g_lib.entries[g_all[i].lib];
+        if (le.rr3Wrapped && le.whole && le.archive >= 0 && (size_t)le.archive < g_lib.archives.size())
+            return nfsnl::readFile(g_lib.archives[le.archive].path, out);
+        return readAsset(g_all[i], out);
+    }
+    return false;
+}
+
+// a file of the library by its path, or else by its name alone
+static bool readLibraryFile(const std::string& want, Bytes& out) {
+    out.clear();
     if (want.empty()) return false;
     for (size_t i = 0; i < g_all.size(); ++i)
         if (g_all[i].path == want) return readAsset(g_all[i], out);
@@ -3675,8 +3887,61 @@ static void textureNlScene(nfsnl::Model& m, const std::string& path) {
     }
 }
 
+// The car's tyre diameters as the game sizes its wheels: its id from
+// vehicles/data/<id>_<car>.bin.nct, its row of suspensionbehaviour.
+static bool carTyreDiameters(const std::string& modelPath, float out[2]) {
+    std::string car = nfsnl::rr3CarNameFor(modelPath);
+    if (car.empty()) return false;
+    uint32_t id = 0;
+    for (size_t i = 0; i < g_all.size() && !id; ++i)
+        id = nfsnl::rr3CarIdFromDataName(nfsnl::baseName(g_all[i].path), car);
+    if (!id) return false;
+    Bytes raw, plain;
+    if (!readLibraryFile("suspensionbehaviour.suspensiondata.nct", raw) &&
+        !readLibraryFile("suspensionbehaviour.suspensiondata", raw)) return false;
+    if (!nfsnl::nctTransform(raw.data(), raw.size(), plain, nullptr)) plain = raw;
+    return nfsnl::rr3TyreDiameters(plain.data(), plain.size(), id, out);
+}
+
 static void applySidecars(nfsnl::Model& m, const std::string& path,
                           const Bytes& points) {
+    // Real Racing 3's <car>_shared.m3g on its own is one wheel with both
+    // sides' calipers round it. Shown the way the game puts it together: the
+    // four corners on the car's POINT_WHEEL_xx at the car's tyre size, with
+    // the file's parts that live in the car's space (light glows, the bonnet
+    // camera's body).
+    {
+        std::string leaf = nfsnl::baseName(path);
+        for (char& c : leaf) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        Bytes pb;
+        std::string dir = path.substr(0, path.find_last_of("/\\") + 1);
+        std::string car = nfsnl::rr3CarNameFor(path);
+        if (leaf.size() > 11 && leaf.compare(leaf.size() - 11, 11, "_shared.m3g") == 0 &&
+            readLibraryFile(dir + car + ".points", pb)) {
+            std::vector<nfsnl::Hardpoint> pts = nfsnl::rr3ReadPoints(pb.data(), pb.size());
+            nfsnl::Model corners;
+            corners.valid = true;
+            corners.materials = m.materials;
+            float d[2];
+            bool have = carTyreDiameters(path, d);
+            if (!pts.empty() && nfsnl::rr3AttachWheels(corners, m, pts, false, have ? d : nullptr) > 0) {
+                for (const nfsnl::Mesh& me : m.meshes) {
+                    std::string n = me.name;
+                    // wheel-local pieces went into the corners; motion blur stays out
+                    if (n.find("BLUR") != std::string::npos || n.find("TYRE") != std::string::npos ||
+                        n.find("TIRE") != std::string::npos || n.find("ROTOR") != std::string::npos ||
+                        n.find("CALIPER") != std::string::npos || n.find("_WHEEL_") != std::string::npos ||
+                        n.find("WHEEL_mm") != std::string::npos)
+                        continue;
+                    corners.meshes.push_back(me);
+                }
+                corners.warnings = m.warnings;
+                corners.warnings.push_back("shown as the game assembles it: four corners on " + car + ".points");
+                corners.points = pts;
+                m = std::move(corners);
+            }
+        }
+    }
     // NFS Undercover, Shift and Shift 2: standard M3G scenes. What the game
     // binds to them by name: a car's textures and wheels, a cockpit's
     // textures, a location's layout and atlases, a sky's picture.
@@ -3870,13 +4135,18 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
             // the steering wheel's point is in the cockpit's file
             Bytes inner;
             std::string innerName = nfsnl::baseName(nfsnl::rr3InteriorPointsNameFor(path));
-            bool hadSteer = false;
+            bool hadSteer = false, haveWheelCentre = false;
+            float wheelCentre[3] = {0, 0, 0};
             for (const auto& h : pts) if (h.name == "POINT_STEERING_WHEEL") hadSteer = true;
             if (!hadSteer && !innerName.empty()) {
                 if (readInteriorPoints(path, inner)) {
                     std::vector<nfsnl::Hardpoint> ipts =
                         nfsnl::rr3ReadPoints(inner.data(), inner.size());
                     nfsnl::rr3MergeCockpitPoints(pts, ipts);
+                    Bytes cockpit;
+                    if (readInteriorModel(path, cockpit) &&
+                        nfsnl::rr3CockpitWheelCentre(cockpit.data(), cockpit.size(), ipts, wheelCentre))
+                        haveWheelCentre = true;
                     bool got = false;
                     for (const auto& h : pts) if (h.name == "POINT_STEERING_WHEEL") got = true;
                     std::string names;
@@ -3890,6 +4160,13 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
                 }
             }
             nfsnl::rr3PlaceParts(m, pts);
+            float shiftCm = 0;
+            if (haveWheelCentre && nfsnl::rr3AlignSteering(m, wheelCentre, &shiftCm)) {
+                char cm[32];
+                snprintf(cm, sizeof(cm), "%.1f", shiftCm);
+                m.warnings.push_back("steering wheel lined up with the one in " +
+                                     nfsnl::baseName(nfsnl::rr3InteriorModelNameFor(path)) + " (moved " + cm + " cm)");
+            }
             bool wantsWheels = false;
             for (const auto& h : pts)
                 if (h.name.rfind("POINT_WHEEL", 0) == 0) wantsWheels = true;
@@ -3926,8 +4203,11 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
                     gotWheel = wheel.valid;
                 }
             }
-            if (wantsWheels && (gotWheel || findWheelModel(path, wheel)))
-                nfsnl::rr3AttachWheels(m, wheel, pts, isRr1);
+            if (wantsWheels && (gotWheel || findWheelModel(path, wheel))) {
+                float d[2];
+                bool have = !isRr1 && carTyreDiameters(path, d);
+                nfsnl::rr3AttachWheels(m, wheel, pts, isRr1, have ? d : nullptr);
+            }
         }
     }
     // Real Racing 2 pairs a model with its textures by file name
@@ -3947,6 +4227,20 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
             m.warnings.push_back(b);
         }
         if (!report.empty()) m.warnings.push_back("no texture found for: " + report);
+        // a cockpit: its baked light, from <car>_int_shadows
+        bool cockpit = false;
+        for (const nfsnl::Mesh& me : m.meshes)
+            if (me.name.find("_INT_") != std::string::npos && !me.uvs2.empty()) { cockpit = true; break; }
+        if (cockpit) {
+            std::string shadows = findTextureByStem(nfsnl::rr3CarNameFor(path) + "_int_shadows");
+            Bytes raw;
+            int lit = 0;
+            if (!shadows.empty() && readStoredFile(shadows, raw))
+                lit = nfsnl::rr3BakeCockpitLight(m, raw.data(), raw.size());
+            if (lit)
+                m.warnings.push_back(std::to_string(lit) + " cockpit part(s) shaded from " + nfsnl::baseName(shadows) +
+                                     " (the mean of its sun-shadow frames)");
+        }
         // a Real Racing 3 track (processed/high/<track>.m3g): its sky, kept
         // one folder up as <track>_sky.m3g, drawn with it
         std::string norm = path;
@@ -4616,6 +4910,37 @@ static void paintPreview(HDC hdc) {
 
 // ----------------------------------------------------------------- saving
 
+// A texture a model refers to, decoded: a game file (or the picture the user
+// imported over it), one the model carries inside (#img:N), or a No Limits
+// paint (#paint:...). What the PNG export and the .glb share.
+static bool imageForTextureRef(const std::string& t, const std::vector<nfsnl::Image>& embedded, nfsnl::Image& img) {
+    int pMode = 0;
+    float pRgb[3];
+    std::string pBase;
+    bool painted = nfsnl::nlParsePaintRef(t, pMode, pRgb, pBase);
+    const std::string& ref = painted ? pBase : t;
+    bool have = false;
+    if (painted && pMode == 2) {
+        nfsnl::nlPaintImage(img, 2, pRgb);
+        have = true;
+    } else if (ref.compare(0, 5, "#img:") == 0) {
+        size_t k = (size_t)atoi(t.c_str() + 5);
+        if (k < embedded.size()) { img = embedded[k]; have = img.ok(); }
+    } else {
+        int idx = findAsset(ref);
+        if (idx >= 0) {
+            auto ov = g_texOverride.find(g_all[idx].path);
+            if (ov != g_texOverride.end()) { img = ov->second; have = true; }
+            else {
+                Bytes raw;
+                have = readAsset(g_all[idx], raw) && nfsnl::decodeTextureFile(raw.data(), raw.size(), img);
+            }
+        }
+    }
+    if (have && painted && pMode == 1) nfsnl::nlPaintImage(img, 1, pRgb);
+    return have;
+}
+
 // Build the Save-As filter string for an asset; filterIndex maps to formats[].
 static void buildFilter(const std::string& assetPath,
                         std::wstring& filter, std::vector<std::string>& formats) {
@@ -4628,6 +4953,7 @@ static void buildFilter(const std::string& assetPath,
     for (const std::string& fmt : formats) {
         if (fmt == "fbx")      add(L"Autodesk FBX (*.fbx)", L"*.fbx");
         else if (fmt == "obj") add(L"Wavefront OBJ (*.obj)", L"*.obj");
+        else if (fmt == "glb") add(L"glTF 2.0 binary, textures inside (*.glb)", L"*.glb");
         else if (fmt == "png") add(L"PNG image (*.png)", L"*.png");
         else if (fmt == "jpg") add(L"JPEG image (*.jpg)", L"*.jpg");
         else if (fmt == "bmp") add(L"Windows bitmap (*.bmp)", L"*.bmp");
@@ -4878,7 +5204,8 @@ static void saveAsset(HWND owner, const Entry& e) {
     bool wroteModel = false;
     std::vector<std::pair<std::string, std::string>> exportTextures;   // ref, png name
     std::vector<nfsnl::Image> embeddedTextures;                         // the model's own (#img:N)
-    if (fmt == "fbx" || fmt == "obj") {
+    std::string glbNote;
+    if (fmt == "fbx" || fmt == "obj" || fmt == "glb") {
         std::vector<std::pair<std::string, Bytes>> banims;
         readSidecarBanims(e.path, banims);
         if (!points.empty() || !banims.empty() || nfsnl::extensionOf(e.path) == "sb3d" ||
@@ -4928,6 +5255,28 @@ static void saveAsset(HWND owner, const Entry& e) {
                         MessageBoxW(owner, L"Nothing is left to export with that choice.", L"Export track",
                                     MB_ICONINFORMATION);
                         return;
+                    }
+                }
+                // Body kits (No Limits): the version the viewer shows, or
+                // every kit's parts. Before, every kit but stock came in
+                // hidden, and most programs left the hidden parts out.
+                {
+                    std::string kits = nfsnl::modelKits(m);
+                    if (!kits.empty()) {
+                        std::string kit = g_viewPath == e.path ? g_view.kit : std::string("stock");
+                        if (kit.empty()) kit = "stock";
+                        std::wstring label = kit == "stock" ? std::wstring(L"Stock")
+                                           : kit == "all" ? std::wstring(L"All parts")
+                                           : L"Kit " + std::wstring(1, (wchar_t)(kit[0] - 'a' + 'A'));
+                        std::wstring list;
+                        for (char c : kits) list += (list.empty() ? L"" : L", ") + std::wstring(1, (wchar_t)(c - 'a' + 'A'));
+                        std::wstring q = L"This car has body kits (" + list + L").\n\n"
+                                         L"Yes - export the version the viewer shows: " + label +
+                                         L"\n       (pick another in the kit list under the view first)\n"
+                                         L"No - export every part of every kit, all visible (they sit on top of each other)";
+                        int a = MessageBoxW(owner, q.c_str(), L"Export body kit", MB_YESNOCANCEL | MB_ICONQUESTION);
+                        if (a == IDCANCEL) return;
+                        nfsnl::keepKit(m, a == IDYES ? kit : std::string("all"));
                     }
                 }
                 // A No Limits track with a limited-time layer shown in the
@@ -4997,7 +5346,7 @@ static void saveAsset(HWND owner, const Entry& e) {
                     leaves.insert(png);
                     leafFor[t] = png;
                 }
-                if (!leafFor.empty()) {
+                if (!leafFor.empty() && fmt != "glb") {     // a .glb takes them inside, unasked
                     std::wstring q = L"Export the " + std::to_wstring(leafFor.size()) +
                                      L" texture(s) this model uses as well?\n\n"
                                      L"Yes - the model and its textures, as PNG files in the "
@@ -5019,11 +5368,24 @@ static void saveAsset(HWND owner, const Entry& e) {
                         embeddedTextures = m.images;
                     }
                 }
+                if (fmt == "glb") {
+                    // one file: every texture decoded and put inside as PNG
+                    std::vector<nfsnl::Image> own = m.images;
+                    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+                    wroteModel = nfsnl::writeGlb(m, out, [&](const std::string& ref) {
+                        nfsnl::Image img;
+                        return imageForTextureRef(ref, own, img) ? nfsnl::encodePng(img) : Bytes();
+                    }, &glbNote, nfsnl::stripExtension(nfsnl::baseName(e.path)));
+                    SetCursor(old);
+                    if (wroteModel) usedExt = fmt;
+                }
                 // paint the textures did not take along: the plain texture
                 // name, and the body keeps its colour as the material's
+                if (fmt != "glb") {
                 for (auto& mesh : m.meshes)
                     if (mesh.texture.compare(0, 7, "#paint:") == 0) mesh.texture = nfsnl::nlUnpaintRef(mesh.texture);
                 wroteModel = nfsnl::writeModel(m, fmt, out);
+                }
                 if (wroteModel) usedExt = fmt;
             }
         }
@@ -5117,38 +5479,17 @@ static void saveAsset(HWND owner, const Entry& e) {
         MessageBoxW(owner, L"Could not write the file.", L"Save failed", MB_ICONERROR);
         return;
     }
-    char msg[MAX_PATH + 128];
-    snprintf(msg, sizeof(msg), "Saved %u bytes to %s", (unsigned)out.size(), target.c_str());
+    char msg[MAX_PATH + 320];
+    snprintf(msg, sizeof(msg), "Saved %u bytes to %s%s%s", (unsigned)out.size(), target.c_str(),
+             glbNote.empty() ? "" : " - ", glbNote.c_str());
     // the textures, beside the model
     if (!exportTextures.empty()) {
         std::string dir = target.substr(0, target.find_last_of("\\/") + 1);
         int ok = 0, bad = 0;
         HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
         for (const auto& t : exportTextures) {
-            int pMode = 0;
-            float pRgb[3];
-            std::string pBase;
-            bool painted = nfsnl::nlParsePaintRef(t.first, pMode, pRgb, pBase);
-            const std::string& ref = painted ? pBase : t.first;
-            int idx = ref.compare(0, 5, "#img:") == 0 ? -1 : findAsset(ref);
             nfsnl::Image img;
-            bool have = false;
-            if (painted && pMode == 2) {
-                nfsnl::nlPaintImage(img, 2, pRgb);
-                have = true;
-            } else if (ref.compare(0, 5, "#img:") == 0) {
-                size_t k = (size_t)atoi(t.first.c_str() + 5);
-                if (k < embeddedTextures.size()) { img = embeddedTextures[k]; have = img.ok(); }
-            } else if (idx >= 0) {
-                auto ov = g_texOverride.find(g_all[idx].path);
-                if (ov != g_texOverride.end()) { img = ov->second; have = true; }
-                else {
-                    Bytes raw;
-                    have = readAsset(g_all[idx], raw) &&
-                           nfsnl::decodeTextureFile(raw.data(), raw.size(), img);
-                }
-            }
-            if (have && painted && pMode == 1) nfsnl::nlPaintImage(img, 1, pRgb);
+            bool have = imageForTextureRef(t.first, embeddedTextures, img);
             Bytes png = have ? nfsnl::encodePng(img) : Bytes();
             if (!png.empty() && nfsnl::writeFile(dir + t.second, png)) ++ok; else ++bad;
         }
@@ -5458,6 +5799,7 @@ static void treeContextMenu(HWND hwnd) {
         AppendMenuW(menu, MF_STRING, ID_CTX_CONVERT, b.c_str());
     } else if (ent != g_itemToEntry.end()) {
         AppendMenuW(menu, MF_STRING, ID_CTX_SAVE, L"Save as...");
+        AppendMenuW(menu, MF_STRING, ID_TOOLS_SHOW_SOURCE, L"Show the file this asset is in\tCtrl+L");
     } else {
         DestroyMenu(menu);
         return;
@@ -5474,6 +5816,8 @@ static void treeContextMenu(HWND hwnd) {
         startExport(hwnd, entriesUnder(d), strip, cmd == ID_CTX_CONVERT);
     } else if (cmd == ID_CTX_SAVE && ent->second >= 0 && (size_t)ent->second < g_all.size()) {
         saveAsset(hwnd, g_all[ent->second]);
+    } else if (cmd == ID_TOOLS_SHOW_SOURCE) {
+        PostMessageW(hwnd, WM_COMMAND, ID_TOOLS_SHOW_SOURCE, 0);
     }
 }
 
@@ -5760,7 +6104,7 @@ static void paintSplash(HWND hwnd, HDC target) {
     SelectObject(dc, mid);
     SetTextColor(dc, RGB(0xB8, 0xB8, 0xC0));
     TextOutW(dc, 168, 120, L"by GM25", 7);
-    TextOutW(dc, 36, 196, L"1.2.2", 5);
+    TextOutW(dc, 36, 196, L"1.3.0", 5);
     if (g_profile) {
         std::wstring gn = widen(g_profile->name);
         TextOutW(dc, 36, 218, gn.c_str(), (int)gn.size());
@@ -5898,13 +6242,18 @@ static void layout(HWND hwnd) {
         cx += widths[k];
     }
     MoveWindow(g_tree, 0, searchH + colH, treeW, rc.bottom - statusH - searchH - colH, TRUE);
-    // the Save Editor's button: a real toolbar-sized icon, not a 16 px one
-    MoveWindow(g_tbOpen, treeW + 4, 2, 36, 34, TRUE);
-    MoveWindow(g_tbExport, treeW + 44, 2, 36, 34, TRUE);
-    MoveWindow(g_tbImport, treeW + 84, 2, 36, 34, TRUE);
-    MoveWindow(g_tbSave, treeW + 124, 2, 36, 34, TRUE);
-    MoveWindow(g_tbNewCar, treeW + 168, 2, 36, 34, TRUE);
-    MoveWindow(g_saveEdBtn, treeW + 216, 2, 36, 34, TRUE);
+    // There is no menu bar: every command is one of these icons, in one row
+    // at one even step - the files (open, export, import, save), the Real
+    // Racing 3 editors (car creator, racing series, new track, car mod,
+    // points), the Save Editor, encode, then the asset filter and the
+    // options. (The old New car button lives on inside the car creator.)
+    {
+        const int step = 40;
+        HWND row[] = { g_tbOpen, g_tbExport, g_tbImport, g_tbSave, g_tbCreator, g_tbSeries, g_tbTrack,
+                       g_tbMod, g_tbPoints, g_saveEdBtn, g_tbEncode, g_tbFilter, g_tbOptions };
+        int x = treeW + 4;
+        for (HWND b : row) { if (b) MoveWindow(b, x, 2, 36, 34, TRUE); x += step; }
+    }
     int barW = 190;
     bool barUp = IsWindowVisible(g_progress) != 0;
     MoveWindow(g_status, 0, rc.bottom - statusH,
@@ -5936,6 +6285,7 @@ static void layout(HWND hwnd) {
     MoveWindow(g_resetBtn, x, y, 76, h, TRUE);          x += 82;
     MoveWindow(g_texCheck, x, y + 2, 80, 18, TRUE);    x += 84;
     MoveWindow(g_vcolCheck, x, y + 2, 110, 18, TRUE);  x += 114;
+    MoveWindow(g_glowCheck, x, y + 2, 64, 18, TRUE);   x += 68;
     MoveWindow(g_kitCombo, x, y, 90, 200, TRUE);       x += 96;
     MoveWindow(g_paintCombo, x, y, 200, 300, TRUE);    x += 206;
     MoveWindow(g_animBtn, x, y, 76, h, TRUE);
@@ -5973,7 +6323,13 @@ static void encodeEditedFile(HWND hwnd);
 static void importIntoSelected(HWND hwnd);
 static void importModelIntoSelected(HWND hwnd, const Entry& e);
 static bool savePending(HWND hwnd);
-static void newCarFromModel(HWND hwnd);
+static void newCarFromModel(HWND hwnd, int entry = -1, const std::string& modelPath = std::string());
+static void openCarCreator(HWND hwnd);
+static void openRacingSeries(HWND hwnd);
+static void openTrackAdder(HWND hwnd);
+static void installCarMod(HWND hwnd);
+static void editPointsOfSelected(HWND hwnd);
+static void retheme_tool_windows();
 static void addPending(const Entry& e, Bytes bytes, const std::string& what);
 static void importDataIntoSelected(HWND hwnd, const Entry& e);
 
@@ -6024,6 +6380,7 @@ static void importSelected(HWND hwnd) {
                 L"Import", MB_ICONINFORMATION);
 }
 static void openPictureFile(HWND hwnd);
+static void toolbarPopup(HWND hwnd, int which);
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -6054,8 +6411,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                      0, 0, 26, 24, hwnd, (HMENU)IDC_TB_IMPORT, g_inst, nullptr);
         g_tbSave = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
                                    0, 0, 26, 24, hwnd, (HMENU)IDC_TB_SAVE, g_inst, nullptr);
-        g_tbNewCar = CreateWindowExW(0, L"BUTTON", L"New car", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
+        g_tbNewCar = CreateWindowExW(0, L"BUTTON", L"New car", WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
                                      0, 0, 26, 24, hwnd, (HMENU)IDC_TB_NEWCAR, g_inst, nullptr);
+        g_tbCreator = CreateWindowExW(0, L"BUTTON", L"Car creator", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
+                                      0, 0, 26, 24, hwnd, (HMENU)IDC_TB_CREATOR, g_inst, nullptr);
+        g_tbSeries = CreateWindowExW(0, L"BUTTON", L"Racing series", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
+                                     0, 0, 26, 24, hwnd, (HMENU)IDC_TB_SERIES, g_inst, nullptr);
+        {
+            const struct { HWND* h; const wchar_t* name; int id; bool off; } more[] = {
+                { &g_tbTrack, L"New track", IDC_TB_TRACK, true },
+                { &g_tbMod, L"Install a car mod", IDC_TB_MOD, true },
+                { &g_tbPoints, L"Edit car points", IDC_TB_POINTS, true },
+                { &g_tbEncode, L"Encode", IDC_TB_ENCODE, false },
+                { &g_tbFilter, L"Show", IDC_TB_FILTER, false },
+                { &g_tbOptions, L"Options", IDC_TB_OPTIONS, false },
+            };
+            for (const auto& b : more)
+                *b.h = CreateWindowExW(0, L"BUTTON", b.name,
+                                       WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | (b.off ? WS_DISABLED : 0),
+                                       0, 0, 26, 24, hwnd, (HMENU)(INT_PTR)b.id, g_inst, nullptr);
+        }
         g_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
                                     WS_POPUP | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
                                     CW_USEDEFAULT, CW_USEDEFAULT, hwnd, nullptr, g_inst, nullptr);
@@ -6073,8 +6448,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 { g_tbImport, L"Import into the selected asset - a picture into a texture (every game); "
                               L"a model or edited data into Real Racing 3's files" },
                 { g_tbSave, L"Save - write the imported textures and models into the game's files (Ctrl+S)" },
-                { g_tbNewCar, L"New car - build a Real Racing 3 car (.m3g) from an OBJ / FBX model, "
-                              L"on the frame of the selected car" },
+                { g_tbCreator, L"Car creator - add a new Real Racing 3 car (its own id) or make one over into yours: "
+                               L"OBJ / FBX into .m3g, year, brand, drivetrain, performance, upgrades, liveries, "
+                               L"price, sound and textures" },
+                { g_tbSeries, L"Racing series - edit Real Racing 3's career series (title, cars, events) or add new ones, "
+                              L"in a group of the career menu or a new group with your own card" },
+                { g_tbTrack, L"New track - add a track to Real Racing 3" },
+                { g_tbMod, L"Install a car mod - add a modded car to Real Racing 3 (a free slot when its id is taken)" },
+                { g_tbPoints, L"Edit car points - move the selected car's lights, exhausts and other points" },
+                { g_tbEncode, L"Encode an edited file back to .nct / .gui" },
+                { g_tbFilter, L"Show - all assets, textures, 3D models or sounds; convert everything shown" },
+                { g_tbOptions, L"Options - theme, vgmstream, LZHAM, about" },
             };
             for (const auto& t : tips) {
                 ti.uId = (UINT_PTR)t.h;
@@ -6086,7 +6470,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                      WS_CHILD, 0, 0, 100, 16, hwnd,
                                      (HMENU)IDC_PROGRESS, g_inst, nullptr);
         SendMessageW(g_progress, PBM_SETRANGE32, 0, 1000);
-        g_status = CreateWindowExW(0, L"STATIC", L"Monkey Tool 1.2.2 - choose a game to begin.",
+        g_status = CreateWindowExW(0, L"STATIC", L"Monkey Tool 1.3.0 - choose a game to begin.",
                                    WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
                                    0, 0, 100, 20, hwnd, (HMENU)IDC_STATUS, g_inst, nullptr);
         // viewer controls; hidden until a model is selected
@@ -6134,6 +6518,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_vcolCheck = CreateWindowExW(0, L"BUTTON", L"Vertex colours",
                                       WS_CHILD | BS_AUTOCHECKBOX,
                                       0, 0, 110, 22, hwnd, (HMENU)IDC_VCOLORS, g_inst, nullptr);
+        // the light glow cards: the beams the lights throw on the road at night
+        g_glowCheck = CreateWindowExW(0, L"BUTTON", L"Lights",
+                                      WS_CHILD | BS_AUTOCHECKBOX,
+                                      0, 0, 64, 22, hwnd, (HMENU)IDC_GLOW, g_inst, nullptr);
         g_textBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                     WS_CHILD | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE |
                                     ES_READONLY | ES_AUTOVSCROLL,
@@ -6182,7 +6570,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         for (HWND c : {g_rimLabel, g_rimCombo, g_rimApply})
             SendMessageW(c, WM_SETFONT, (WPARAM)f, TRUE);
         for (HWND c : {g_lodCombo, g_kitCombo, g_paintCombo, g_posLabel, g_posX, g_posY, g_posZ, g_resetBtn, g_animBtn,
-                       g_texCheck, g_vcolCheck, g_textBox, g_playBtn, g_stopBtn,
+                       g_texCheck, g_vcolCheck, g_glowCheck, g_textBox, g_playBtn, g_stopBtn,
                        g_prevBtn, g_backBtn, g_fwdBtn, g_nextBtn, g_timeLabel,
                        g_searchBox, g_searchLabel})
             SendMessageW(c, WM_SETFONT, (WPARAM)f, TRUE);
@@ -6273,11 +6661,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = GetDC(hwnd);
         HFONT f = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HFONT old = (HFONT)SelectObject(dc, f);
-        SIZE sz{};
-        GetTextExtentPoint32W(dc, text, (int)wcslen(text), &sz);
+        // the label and its shortcut (after a tab) side by side, a gap between
+        std::wstring all = text;
+        size_t tab = all.find(L'\t');
+        std::wstring label = all.substr(0, tab), keys = tab == std::wstring::npos ? L"" : all.substr(tab + 1);
+        SIZE sz{}, kz{};
+        GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz);
+        if (!keys.empty()) GetTextExtentPoint32W(dc, keys.c_str(), (int)keys.size(), &kz);
         SelectObject(dc, old);
         ReleaseDC(hwnd, dc);
-        mis->itemWidth = sz.cx + 18;
+        mis->itemWidth = sz.cx + 18 + (keys.empty() ? 0 : kz.cx + 32);
         mis->itemHeight = sz.cy + 8;
         return TRUE;
     }
@@ -6296,9 +6689,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (dis->CtlType == ODT_BUTTON &&
             (dis->CtlID == IDC_TB_OPEN || dis->CtlID == IDC_TB_EXPORT || dis->CtlID == IDC_TB_IMPORT ||
-             dis->CtlID == IDC_TB_SAVE || dis->CtlID == IDC_TB_NEWCAR)) {
+             dis->CtlID == IDC_TB_SAVE || dis->CtlID == IDC_TB_NEWCAR || dis->CtlID == IDC_TB_CREATOR ||
+             dis->CtlID == IDC_TB_SERIES || dis->CtlID == IDC_TB_TRACK || dis->CtlID == IDC_TB_MOD ||
+             dis->CtlID == IDC_TB_POINTS || dis->CtlID == IDC_TB_ENCODE || dis->CtlID == IDC_TB_FILTER ||
+             dis->CtlID == IDC_TB_OPTIONS)) {
+            // the slots of toolbar_icons.png
             int icon = dis->CtlID == IDC_TB_OPEN ? 0 : dis->CtlID == IDC_TB_EXPORT ? 1 :
-                       dis->CtlID == IDC_TB_IMPORT ? 2 : dis->CtlID == IDC_TB_SAVE ? 3 : 4;
+                       dis->CtlID == IDC_TB_IMPORT ? 2 : dis->CtlID == IDC_TB_SAVE ? 3 :
+                       dis->CtlID == IDC_TB_CREATOR ? 6 : dis->CtlID == IDC_TB_SERIES ? 4 :
+                       dis->CtlID == IDC_TB_TRACK ? 7 : dis->CtlID == IDC_TB_MOD ? 8 :
+                       dis->CtlID == IDC_TB_POINTS ? 9 : dis->CtlID == IDC_TB_ENCODE ? 10 :
+                       dis->CtlID == IDC_TB_FILTER ? 11 : dis->CtlID == IDC_TB_OPTIONS ? 12 : 4;
             drawToolButton(dis, icon);
             return TRUE;
         }
@@ -6329,8 +6730,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // underline until Windows says to show accelerator cues.
         UINT prefix = (LOWORD(SendMessageW(hwnd, WM_QUERYUISTATE, 0, 0)) & UISF_HIDEACCEL)
                       ? DT_HIDEPREFIX : 0;
-        DrawTextW(dis->hDC, text, -1, &tr,
+        std::wstring all = text;
+        size_t tab = all.find(L'\t');
+        DrawTextW(dis->hDC, all.substr(0, tab).c_str(), -1, &tr,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | prefix);
+        if (tab != std::wstring::npos) {
+            // the shortcut, right-aligned, dimmer
+            if (!disabled) SetTextColor(dis->hDC, pal().dimText);
+            DrawTextW(dis->hDC, all.substr(tab + 1).c_str(), -1, &tr,
+                      DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
         if (checked) {
             RECT cr = dis->rcItem;
             cr.left += 2; cr.right = cr.left + 8;
@@ -6372,7 +6781,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = (HDC)wp;
         SetTextColor(dc, pal().text);
         // the Move X Y Z label sits on the pane, not on the window background
-        bool onPane = (HWND)lp == g_posLabel || (HWND)lp == g_texCheck || (HWND)lp == g_vcolCheck ||
+        bool onPane = (HWND)lp == g_posLabel || (HWND)lp == g_texCheck || (HWND)lp == g_vcolCheck || (HWND)lp == g_glowCheck ||
                       (HWND)lp == g_timeLabel || (HWND)lp == g_rimLabel;
         SetBkColor(dc, onPane ? pal().previewBg : pal().windowBg);
         if (onPane) {
@@ -6662,9 +7071,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_NEXT: playerStep(1);    return 0;
         case IDC_TEXTURED:
         case IDC_VCOLORS:
+        case IDC_GLOW:
             if (g_viewActive) {
                 g_view.textured = SendMessageW(g_texCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
                 g_view.vertexColors = SendMessageW(g_vcolCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                g_view.hideGlow = SendMessageW(g_glowCheck, BM_GETCHECK, 0, 0) != BST_CHECKED;
                 g_viewDirty = true;
                 InvalidateRect(hwnd, &g_viewRect, FALSE);
             }
@@ -6692,6 +7103,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             fresh.kit = keepKit;
             fresh.textured = SendMessageW(g_texCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
             fresh.vertexColors = SendMessageW(g_vcolCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            fresh.hideGlow = SendMessageW(g_glowCheck, BM_GETCHECK, 0, 0) != BST_CHECKED;
             const Palette& p = pal();
             fresh.background[0] = (float)GetRValue(p.previewBg);
             fresh.background[1] = (float)GetGValue(p.previewBg);
@@ -6836,6 +7248,33 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_TB_NEWCAR:
             newCarFromModel(hwnd);
             return 0;
+        case IDC_TB_FILTER:
+        case IDC_TB_OPTIONS:
+            toolbarPopup(hwnd, LOWORD(wp));
+            return 0;
+        case IDC_TB_ENCODE:
+            encodeEditedFile(hwnd);
+            return 0;
+        case IDC_TB_TRACK:
+        case ID_TOOLS_NEW_TRACK:
+            openTrackAdder(hwnd);
+            return 0;
+        case IDC_TB_MOD:
+        case ID_TOOLS_INSTALL_MOD:
+            installCarMod(hwnd);
+            return 0;
+        case IDC_TB_POINTS:
+        case ID_TOOLS_EDIT_POINTS:
+            editPointsOfSelected(hwnd);
+            return 0;
+        case IDC_TB_SERIES:
+        case ID_TOOLS_RACING_SERIES:
+            openRacingSeries(hwnd);
+            return 0;
+        case IDC_TB_CREATOR:
+        case ID_TOOLS_CAR_CREATOR:
+            openCarCreator(hwnd);
+            return 0;
         case ID_FILE_EXIT:
             SendMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;
@@ -6849,10 +7288,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             saveThemePref();
             applyTheme();
             saveEditorSetTheme(saveEditorTheme());
+            retheme_tool_windows();
             return 0;
         case ID_HELP_ABOUT:
             MessageBoxW(hwnd,
-                L"Monkey Tool 1.2.2\n\n"
+                L"Monkey Tool 1.3.0\n\n"
                 L"Games: NFS No Limits, No Limits VR, Edge, Most Wanted,\n"
                 L"Hot Pursuit; Real Racing Next, 3, 2, Real Racing and GTI.\n\n"
                 L"Need for Speed: No Limits - unpacks the .pack archives and\n"
@@ -6869,7 +7309,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 L"No Limits' LZHAM-packed .m3g models and cabinets are read by\n"
                 L"the decoder built into this program - no DLL needed.\n"
                 L"Wwise Vorbis sounds need vgmstream-cli.exe.\n\n"
-                L"The floppy-disk button (Ctrl+E) opens the built-in Save Editor for\n"
+                L"The Save Editor button (Ctrl+E) opens the built-in Save Editor for\n"
                 L"No Limits and Real Racing 3 saves.\n\n"
                 L"Tool by GM25, September 2026.",
                 L"About Monkey Tool", MB_ICONINFORMATION);
@@ -7167,7 +7607,7 @@ static void paintPicker(HWND hwnd, HDC target) {
     SelectObject(hdc, small);
     SetTextColor(hdc, dim);
     RECT vr{kPickSide + 110, rc.bottom - kPickFooter, rc.right - kPickSide - 110, rc.bottom};
-    DrawTextW(hdc, L"Monkey Tool 1.2.2 by GM25", -1, &vr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(hdc, L"Monkey Tool 1.3.0 by GM25", -1, &vr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(hdc, oldFont);
     DeleteObject(title);
@@ -7395,7 +7835,7 @@ static void openGameBody(HWND hwnd, bool askProfile) {
         }
     }
     g_gameFolder = folder;
-    std::wstring caption = L"Monkey Tool 1.2.2 - " + widen(g_profile->name);
+    std::wstring caption = L"Monkey Tool 1.3.0 - " + widen(g_profile->name);
     SetWindowTextW(hwnd, caption.c_str());
     setStatus("");
     startIndexThread(folder);
@@ -7707,77 +8147,48 @@ static void encodeEditedFile(HWND hwnd) {
         MessageBoxW(hwnd, L"Could not write the file.", L"Encode", MB_ICONERROR);
         return;
     }
-    char msg[900];
-    int n = snprintf(msg, sizeof(msg), "Encoded %u bytes to\n%s\n\n",
-                     (unsigned)out.size(), where.c_str());
-    if (pastPad)
-        n += snprintf(msg + n, sizeof(msg) - n,
-                      "%u byte(s) at the end are past the pad and were copied unchanged - "
-                      "the game will not read them as written. Run File > Finish the .nct "
-                      "pad on the whole game to extend it.\n\n", (unsigned)pastPad);
-    if (!originalPlain.empty())
-        n += snprintf(msg + n, sizeof(msg) - n, risky
-            ? "Compared with the original: %u changed byte(s) sit on offsets the pad is "
-              "not certain of, and may come out wrong in the game.\n"
-            : "Compared with the original: every changed byte sits on an offset the pad "
-              "is certain of.%.0u\n", (unsigned)risky);
-    else
-        n += snprintf(msg + n, sizeof(msg) - n,
-                      "The original is not open here, so the edit could not be checked; "
-                      "%u of the file's offsets are not certain in the pad.\n",
-                      (unsigned)uncertain);
-    MessageBoxW(hwnd, widen(msg).c_str(), L"Encode",
-                (risky || pastPad) ? MB_ICONWARNING : MB_ICONINFORMATION);
-    logLine("nct encode: %s -> %s, %u uncertain, %u risky, %u past pad", in.c_str(),
-            where.c_str(), (unsigned)uncertain, (unsigned)risky, (unsigned)pastPad);
+    char msg[600];
+    snprintf(msg, sizeof(msg), "Encoded %u bytes to\n%s\n\nThe tool has Real Racing 3's own cipher, so the whole file "
+             "is encoded exactly as the game reads it.", (unsigned)out.size(), where.c_str());
+    MessageBoxW(hwnd, widen(msg).c_str(), L"Encode", MB_ICONINFORMATION);
+    logLine("nct encode: %s -> %s (%u bytes)", in.c_str(), where.c_str(), (unsigned)out.size());
+    (void)risky; (void)uncertain; (void)pastPad;
 }
 
-static HMENU buildMenu() {
-    HMENU file = CreatePopupMenu();
-    AppendMenuW(file, MF_STRING, ID_FILE_OPEN, L"&Open game files...\tCtrl+O");
-    AppendMenuW(file, MF_STRING, ID_FILE_GAME, L"Change &game...");
-    AppendMenuW(file, MF_STRING, ID_FILE_CONVERT, L"&Convert all shown to a folder...");
-    AppendMenuW(file, MF_STRING, ID_FILE_EXPORT_SELECTED, L"&Export selected to a folder (PNG, FBX, WAV)...");
-    AppendMenuW(file, MF_STRING, ID_FILE_EXTRACT_SELECTED, L"E&xtract selected to a folder...");
-    AppendMenuW(file, MF_STRING, ID_FILE_OPEN_PICTURE, L"Open a &picture (PNG, JPG)...");
-    AppendMenuW(file, MF_STRING, ID_FILE_SAVE_PENDING, L"&Save imported files\tCtrl+S");
-    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, ID_FILE_VGMSTREAM, L"Locate &vgmstream-cli.exe...");
-    AppendMenuW(file, MF_STRING, ID_FILE_LZHAM, L"Use another &LZHAM decoder DLL (optional)...");
-    AppendMenuW(file, MF_STRING, ID_FILE_NCT,
-                L"Finish the .&nct pad from this game...");
-    AppendMenuW(file, MF_STRING, ID_FILE_NCT_ENCODE,
-                L"&Encode an edited file back to .nct / .gui...");
-    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING, ID_FILE_EXIT, L"E&xit");
-
-    HMENU view = CreatePopupMenu();
-    AppendMenuW(view, MF_STRING, ID_VIEW_ALL, L"&All assets");
-    AppendMenuW(view, MF_STRING, ID_VIEW_TEX, L"&Textures (.sba)");
-    AppendMenuW(view, MF_STRING, ID_VIEW_MODEL, L"&3D models (.sb3d)");
-    AppendMenuW(view, MF_STRING, ID_VIEW_SOUND, L"&Sounds");
-    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(view, MF_STRING, ID_THEME_LIGHT, L"&Light theme");
-    AppendMenuW(view, MF_STRING, ID_THEME_DARK, L"&Dark theme");
-
-    HMENU tools = CreatePopupMenu();
-    AppendMenuW(tools, MF_STRING, ID_TOOLS_SAVE_EDITOR, L"&Save Editor...\tCtrl+E");
-    AppendMenuW(tools, MF_STRING, ID_TOOLS_IMPORT,
-                L"&Import PNG/JPG into this texture...\tCtrl+I");
-    AppendMenuW(tools, MF_STRING, ID_TOOLS_SHOW_SOURCE,
-                L"Show the &file this asset is in\tCtrl+L");
-    AppendMenuW(tools, MF_STRING, ID_FILE_NCT_ENCODE,
-                L"&Encode an edited file back to .nct / .gui...");
-
-    HMENU help = CreatePopupMenu();
-    AppendMenuW(help, MF_STRING, ID_HELP_ABOUT, L"&About Monkey Tool");
-
-    HMENU bar = CreateMenu();
-    AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File");
-    AppendMenuW(bar, MF_POPUP, (UINT_PTR)view, L"&View");
-    AppendMenuW(bar, MF_POPUP, (UINT_PTR)tools, L"&Tools");
-    AppendMenuW(bar, MF_POPUP, (UINT_PTR)help, L"&Help");
-    return bar;
+// The two icons that open a list: Show (which assets the tree lists) and
+// Options (the look, the helper programs, about). Drawn the way the theme
+// draws, under the icon that opened them.
+static void toolbarPopup(HWND hwnd, int which) {
+    HMENU menu = CreatePopupMenu();
+    HMENU theme = nullptr;
+    auto check = [](bool on) { return (UINT)(MF_STRING | (on ? MF_CHECKED : MF_UNCHECKED)); };
+    if (which == IDC_TB_FILTER) {
+        AppendMenuW(menu, check(g_filter == "all"), ID_VIEW_ALL, L"All assets");
+        AppendMenuW(menu, check(g_filter == "texture"), ID_VIEW_TEX, L"Textures");
+        AppendMenuW(menu, check(g_filter == "model"), ID_VIEW_MODEL, L"3D models");
+        AppendMenuW(menu, check(g_filter == "sound"), ID_VIEW_SOUND, L"Sounds");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, ID_FILE_CONVERT, L"Convert everything shown...");
+    } else {
+        theme = CreatePopupMenu();
+        AppendMenuW(theme, check(!g_dark), ID_THEME_LIGHT, L"Light");
+        AppendMenuW(theme, check(g_dark), ID_THEME_DARK, L"Dark");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)theme, L"Theme");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, ID_FILE_VGMSTREAM, L"Locate vgmstream-cli.exe (sounds)...");
+        AppendMenuW(menu, MF_STRING, ID_FILE_LZHAM, L"LZHAM decoder DLL (optional)...");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, ID_HELP_ABOUT, L"About Monkey Tool");
+    }
+    // the labels of the last list are not needed once it is gone
+    g_menuLabels.clear();
+    themeMenu(menu, false);
+    RECT r{};
+    GetWindowRect(GetDlgItem(hwnd, which), &r);
+    int cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, r.left, r.bottom, 0,
+                                  hwnd, nullptr);
+    DestroyMenu(menu);              // takes the Theme list with it
+    if (cmd) PostMessageW(hwnd, WM_COMMAND, (WPARAM)cmd, 0);
 }
 
 // The icon comes from the compiled-in resource. If it is not there - the
@@ -7803,7 +8214,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     g_inst = inst;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES |
-                                          ICC_PROGRESS_CLASS};
+                                          ICC_PROGRESS_CLASS | ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
     SetUnhandledExceptionFilter(crashHandler);
     std::set_terminate([] {
@@ -7813,12 +8224,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
                     L"Monkey Tool", MB_ICONERROR);
         ExitProcess(3);
     });
-    logLine("---- Monkey Tool 1.2.2 starting ----");
+    logLine("---- Monkey Tool 1.3.0 starting ----");
     findLzham();
-    // a pad finished from a previous session's game files
-    if (nfsnl::nctPadLoad(exeFolder() + "\\nct_pad.bin"))
-        logLine("nct: pad loaded from nct_pad.bin, %u byte(s) known",
-                (unsigned)nfsnl::nctPadKnownBytes());
     logLine("codecs: zstd %s, LZHAM %s",
             nfsnl::zstdAvailable() ? "yes" : "missing",
             nfsnl::lzhamAvailable() ? nfsnl::lzhamBackend().c_str() : "missing");
@@ -7841,9 +8248,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     wc.lpszClassName = L"MonkeyTool";
     RegisterClassExW(&wc);
 
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"Monkey Tool 1.2.2",
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"Monkey Tool 1.3.0",
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-                             1100, 700, nullptr, buildMenu(), inst, nullptr);
+                             1100, 700, nullptr, nullptr, inst, nullptr);
     // also set them on the window itself - a class icon alone is not always
     // picked up for the title bar and the taskbar button
     if (appIcon) SendMessageW(g_main, WM_SETICON, ICON_BIG, (LPARAM)appIcon);
@@ -7948,8 +8355,13 @@ static void updateToolbarState() {
     if (g_tbSave) EnableWindow(g_tbSave, g_pending.empty() ? FALSE : TRUE);
     bool rr3 = g_profile && g_profile->id == "real_racing_3";
     if (g_tbNewCar) EnableWindow(g_tbNewCar, rr3 && !g_busy ? TRUE : FALSE);
+    if (g_tbSeries) EnableWindow(g_tbSeries, rr3 && !g_busy ? TRUE : FALSE);
+    if (g_tbCreator) EnableWindow(g_tbCreator, rr3 && !g_busy ? TRUE : FALSE);
+    if (g_tbTrack) EnableWindow(g_tbTrack, rr3 && !g_busy ? TRUE : FALSE);
+    if (g_tbMod) EnableWindow(g_tbMod, rr3 && !g_busy ? TRUE : FALSE);
+    if (g_tbPoints) EnableWindow(g_tbPoints, rr3 && !g_busy ? TRUE : FALSE);
     if (g_main) {
-        std::wstring caption = L"Monkey Tool 1.2.2";
+        std::wstring caption = L"Monkey Tool 1.3.0";
         if (g_profile) caption += L" - " + widen(g_profile->name);
         if (!g_pending.empty()) caption += L"  *";
         SetWindowTextW(g_main, caption.c_str());
@@ -8048,28 +8460,33 @@ static bool askNameFixes(HWND hwnd, const Bytes& car, nfsnl::Model& model, bool 
 // New car: a whole Real Racing 3 car .m3g built from an OBJ / FBX, on the
 // frame of the selected car (its header, materials and mesh layout). The
 // result replaces the selected .m3g when Save is clicked.
-static void newCarFromModel(HWND hwnd) {
+static void newCarFromModel(HWND hwnd, int entry, const std::string& modelPath) {
     if (!g_profile || g_profile->id != "real_racing_3") {
         MessageBoxW(hwnd, L"New car works on Real Racing 3 - open Real Racing 3 first.", L"New car", MB_ICONINFORMATION);
         return;
     }
-    HTREEITEM sel = TreeView_GetSelection(g_tree);
-    auto it = g_itemToEntry.find(sel);
-    if (it == g_itemToEntry.end() || it->second < 0 || (size_t)it->second >= g_all.size() ||
-        nfsnl::extensionOf(g_all[it->second].path) != "m3g") {
+    int idx = entry;
+    if (idx < 0) {
+        HTREEITEM sel = TreeView_GetSelection(g_tree);
+        auto it = g_itemToEntry.find(sel);
+        if (it != g_itemToEntry.end()) idx = it->second;
+    }
+    if (idx < 0 || (size_t)idx >= g_all.size() || nfsnl::extensionOf(g_all[idx].path) != "m3g") {
         MessageBoxW(hwnd, L"Select the car model to turn into your car first - a Real Racing 3 car's "
                           L"<car>_a.m3g (vehicles/<car>/<car>_a.m3g).\n\nThe new model takes that "
                           L"car's place in the game: its wheels, sounds and data stay.",
                     L"New car", MB_ICONINFORMATION);
         return;
     }
-    const Entry e = g_all[it->second];
+    const Entry e = g_all[idx];
     Bytes tmpl;
     std::string err;
     if (!readAsset(e, tmpl, &err)) {
         MessageBoxW(hwnd, (L"Could not read the car.\n\n" + widen(err)).c_str(), L"New car", MB_ICONERROR);
         return;
     }
+    std::string path = modelPath;
+    if (path.empty()) {
     wchar_t file[MAX_PATH] = L"";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -8080,7 +8497,8 @@ static void newCarFromModel(HWND hwnd) {
     ofn.lpstrTitle = L"Your car model (OBJ or FBX) - it becomes a Real Racing 3 .m3g";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&ofn)) return;
-    std::string path = narrow(std::wstring(file));
+    path = narrow(std::wstring(file));
+    }
     Bytes src;
     if (!nfsnl::readFile(path, src)) {
         MessageBoxW(hwnd, (L"Could not read\n" + widen(path)).c_str(), L"New car", MB_ICONERROR);
@@ -8111,6 +8529,2496 @@ static void newCarFromModel(HWND hwnd) {
                       "textures them.\n\nClick Save (the blue disk, Ctrl+S) to write it into\n" + pendingTarget(e);
     MessageBoxW(hwnd, widen(msg).c_str(), L"New car", MB_ICONINFORMATION);
     updatePreview(e);
+}
+
+// ---- the tool windows' theme: Real Racing 3's car creator, racing series and
+// new track follow the main window's light / dark theme. Each control is
+// registered as it is made, with what kind it is, and coloured to match ----
+struct ToolTheme {
+    std::vector<std::pair<HWND, char>> ctl;   // b button, r radio / check, e edit, c combo, l list view, x list box
+    std::set<HWND> active;                    // buttons drawn highlighted (the current step)
+};
+static const UINT kLvmSetBkColor = 0x1001, kLvmSetTextColor = 0x1024, kLvmSetTextBkColor = 0x1026, kLvmGetHeader = 0x101F;
+
+static void toolTitleBar(HWND h, bool dark) {
+    static HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    if (!dwm || !h) return;
+    typedef HRESULT (WINAPI *SetAttr)(HWND, DWORD, LPCVOID, DWORD);
+    SetAttr set = (SetAttr)(void*)GetProcAddress(dwm, "DwmSetWindowAttribute");
+    if (!set) return;
+    BOOL on = dark ? TRUE : FALSE;
+    if (set(h, 20, &on, sizeof(on)) != 0) set(h, 19, &on, sizeof(on));
+}
+
+static void ttApply(HWND wnd, ToolTheme& t) {
+    toolTitleBar(wnd, g_dark);
+    for (const auto& c : t.ctl) {
+        HWND h = c.first;
+        switch (c.second) {
+        case 'r':
+            // unthemed, so WM_CTLCOLORSTATIC colours its text
+            SetWindowTheme(h, g_dark ? L"" : nullptr, g_dark ? L"" : nullptr);
+            break;
+        case 'e': case 'x':
+            SetWindowTheme(h, g_dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+            break;
+        case 'c':
+            SetWindowTheme(h, g_dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+            break;
+        case 'l': {
+            SetWindowTheme(h, g_dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+            HWND hdr = (HWND)SendMessageW(h, kLvmGetHeader, 0, 0);
+            if (hdr) SetWindowTheme(hdr, g_dark ? L"DarkMode_ItemsView" : L"Explorer", nullptr);
+            SendMessageW(h, kLvmSetBkColor, 0, (LPARAM)pal().controlBg);
+            SendMessageW(h, kLvmSetTextBkColor, 0, (LPARAM)pal().controlBg);
+            SendMessageW(h, kLvmSetTextColor, 0, (LPARAM)pal().text);
+            break;
+        }
+        }
+    }
+    InvalidateRect(wnd, nullptr, TRUE);
+}
+
+static void ttDrawButton(const DRAWITEMSTRUCT* d, bool active) {
+    HDC dc = d->hDC;
+    RECT r = d->rcItem;
+    bool down = (d->itemState & ODS_SELECTED) != 0;
+    bool off = (d->itemState & ODS_DISABLED) != 0;
+    COLORREF accent = g_dark ? RGB(0x2F, 0x5F, 0xB0) : RGB(0x2A, 0x6C, 0xD8);
+    COLORREF bg = active ? accent : down ? (g_dark ? RGB(0x3A, 0x3A, 0x46) : RGB(0xCC, 0xE0, 0xFF)) : pal().controlBg;
+    HBRUSH b = CreateSolidBrush(pal().windowBg);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+    b = CreateSolidBrush(bg);
+    HPEN pen = CreatePen(PS_SOLID, 1, active ? accent : pal().line);
+    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pen);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, 6, 6);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(b);
+    DeleteObject(pen);
+    wchar_t text[200] = L"";
+    GetWindowTextW(d->hwndItem, text, 200);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, active ? RGB(0xFF, 0xFF, 0xFF) : off ? pal().dimText : pal().text);
+    HGDIOBJ of = SelectObject(dc, g_headerFont);
+    if (down) OffsetRect(&r, 1, 1);
+    DrawTextW(dc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    SelectObject(dc, of);
+}
+
+// the colours every tool window shares; true when the message was handled
+static bool ttMessage(ToolTheme& t, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT& out) {
+    switch (msg) {
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, g_bgBrush ? g_bgBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        out = 1;
+        return true;
+    }
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+        HDC dc = (HDC)wp;
+        bool readOnly = false;
+        for (const auto& c : t.ctl) if (c.first == (HWND)lp && c.second == 'e') readOnly = true;   // a read-only edit
+        SetTextColor(dc, IsWindowEnabled((HWND)lp) ? pal().text : pal().dimText);
+        SetBkColor(dc, readOnly ? pal().controlBg : pal().windowBg);
+        out = (LRESULT)(readOnly ? (g_controlBrush ? g_controlBrush : (HBRUSH)(COLOR_WINDOW + 1))
+                                 : (g_bgBrush ? g_bgBrush : (HBRUSH)(COLOR_BTNFACE + 1)));
+        return true;
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = (HDC)wp;
+        SetTextColor(dc, pal().text);
+        SetBkColor(dc, pal().controlBg);
+        out = (LRESULT)(g_controlBrush ? g_controlBrush : (HBRUSH)(COLOR_WINDOW + 1));
+        return true;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
+        if (d->CtlType != ODT_BUTTON) return false;
+        ttDrawButton(d, t.active.count(d->hwndItem) > 0);
+        out = TRUE;
+        return true;
+    }
+    }
+    return false;
+}
+
+// ---- the car creator (Real Racing 3), in four steps: the car, its
+// performance, its look (models, textures) and its liveries and sound. It
+// adds a new car with its own id, or changes one of the game's cars ----
+static HWND g_ccWnd = nullptr, g_ccCar = nullptr, g_ccList = nullptr, g_ccValue = nullptr, g_ccSound = nullptr,
+            g_ccModel = nullptr, g_ccInt = nullptr, g_ccTex = nullptr, g_ccReport = nullptr, g_ccLabel = nullptr,
+            g_ccOver = nullptr, g_ccAdd = nullptr, g_ccName = nullptr, g_ccYear = nullptr, g_ccBrand = nullptr,
+            g_ccFolderLbl = nullptr, g_ccUpg = nullptr, g_ccClass = nullptr, g_ccDrive = nullptr, g_ccLivList = nullptr,
+            g_ccLivName = nullptr, g_ccLivColour = nullptr, g_ccLivPic = nullptr, g_ccLods = nullptr, g_ccKeep = nullptr,
+            g_ccBack = nullptr, g_ccNext = nullptr, g_ccFinish = nullptr, g_ccFolderBtn = nullptr, g_ccStepTitle = nullptr,
+            g_ccLivNote = nullptr, g_ccAllBtn = nullptr;
+static HWND g_ccStepBtn[4];
+static ToolTheme g_ccTheme;
+static std::map<std::string, std::string> g_ccWrittenTo;   // depot path -> the file on disk it was saved as
+// the points editor (after a new car is saved, or from Tools)
+static void openPointsEditor(HWND owner, const Bytes& model, const Bytes& points, const std::string& car,
+                             const std::string& target, const Bytes& shared = Bytes());
+static std::vector<HWND> g_ccPage[4];                   // the controls of each step
+static std::vector<HWND> g_ccSimple, g_ccAdvanced;      // step 2: the few figures, or all of them
+static bool g_ccShowAll = false;
+static int g_ccStep = 0;
+static std::vector<std::string> g_ccCars;               // model folder names, in the order of the list
+static std::vector<nfsnl::Rr3CarInfo> g_ccInfos;        // the game's car list
+static std::vector<std::pair<std::string, std::string>> g_ccBrands;   // make key, shown make
+static std::vector<std::string> g_ccUpgrades;           // upgrade packages in use
+static std::vector<nfsnl::Rr3NewLivery> g_ccLivs;
+static uint8_t g_ccLivRgb[3] = { 200, 30, 30 };
+static std::string g_ccLivPicPath;
+static COLORREF g_ccCustom[16];
+static bool g_ccAdding = true;
+static nfsnl::Rr3Car g_ccData;
+static bool g_ccHave = false;
+static std::vector<nfsnl::Rr3CarField> g_ccFields;
+static std::map<std::string, std::string> g_ccEdits;   // from the full list of figures
+static int g_ccOwnLiveries = 0;
+struct CcOwnLivery { std::string name, texture; uint8_t rgb[3]; };
+static std::vector<CcOwnLivery> g_ccOwn;               // the car's liveries, as the game has them
+static std::string g_ccCarFolder;                      // the car's model folder
+static HWND g_ccLivTexLbl = nullptr;
+// step 2's boxes: the figure each holds
+struct CcFigure { const char* key; const wchar_t* label; HWND edit; };
+static CcFigure g_ccFig[] = {
+    { "power_hp", L"Power (hp)", nullptr }, { "torque", L"Torque (lb-ft)", nullptr },
+    { "weight_lb", L"Weight (lb)", nullptr }, { "top_speed", L"Top speed (mph)", nullptr },
+    { "accel", L"0-60 mph (s)", nullptr }, { "pr", L"Performance rating (PR)", nullptr },
+    { "price", L"Price (R$)", nullptr }, { "price_gold", L"Price (gold)", nullptr },
+};
+static const char* kCcClasses[] = { "Prod", "Supercar", "Race" };
+static const char* kCcDrives[] = { "RWD", "FWD", "AWD", "RLY" };
+// the game's own words for the engine's breathing, and how the box shows them
+static const char* kCcAsp[] = { "Nat", "Turbo", "Super", "None" };
+static const wchar_t* kCcAspShown[] = { L"Naturally aspirated (Nat)", L"Turbocharged (Turbo)",
+                                         L"Supercharged (Super)", L"None - electric (None)" };
+static HWND g_ccAsp = nullptr;
+enum { IDC_CC_CAR = 4901, IDC_CC_LIST, IDC_CC_VALUE, IDC_CC_SET, IDC_CC_SOUND, IDC_CC_MODELB, IDC_CC_INTB,
+       IDC_CC_TEXB, IDC_CC_MAKE, IDC_CC_FOLDER, IDC_CC_CLOSE, IDC_CC_UNDO, IDC_CC_OVER, IDC_CC_ADD,
+       IDC_CC_LIVCOLOUR, IDC_CC_LIVPIC, IDC_CC_LIVADD, IDC_CC_LIVDEL, IDC_CC_BRAND, IDC_CC_PREVIEW,
+       IDC_CC_BACK, IDC_CC_NEXT, IDC_CC_STEP0, IDC_CC_STEP1, IDC_CC_STEP2, IDC_CC_STEP3, IDC_CC_ALL,
+       IDC_CC_NAME, IDC_CC_YEAR, IDC_CC_LIVNAME };
+
+static std::string ccText(HWND h) {
+    int n = GetWindowTextLengthW(h);
+    std::wstring w((size_t)n + 1, 0);
+    GetWindowTextW(h, &w[0], n + 1);
+    w.resize((size_t)n);
+    return narrow(w);
+}
+
+static void ccReport(const std::string& s) {
+    std::string crlf;
+    for (char c : s) { if (c == '\n') crlf += '\r'; if (c != '\r') crlf += c; }
+    SetWindowTextW(g_ccReport, widen(crlf).c_str());
+}
+
+// The tool windows work on the game's files as they are on disk: a texture
+// the tree shows unwrapped (foo.etc.dds) is foo.etc.dds.z here, read as its
+// wrapped bytes, so what is written back is what the game reads.
+static std::string ccDiskFile(const Entry& e) {
+    const nfsnl::LibraryEntry& le = g_lib.entries[e.lib];
+    if (le.whole && le.archive >= 0 && (size_t)le.archive < g_lib.archives.size()) return g_lib.archives[le.archive].path;
+    return std::string();
+}
+static std::string ccRawPath(const Entry& e) {
+    const nfsnl::LibraryEntry& le = g_lib.entries[e.lib];
+    if (!le.rr3Wrapped) return e.path;
+    std::string disk = ccDiskFile(e), leaf = nfsnl::baseName(e.path), dl = nfsnl::baseName(disk);
+    if (!disk.empty() && dl.size() > leaf.size() && dl.compare(0, leaf.size(), leaf) == 0) return e.path + dl.substr(leaf.size());
+    return e.path;
+}
+static std::map<std::string, int> g_ccRawIndex;           // raw path -> entry
+static size_t g_ccRawFor = (size_t)-1;
+static void ccIndexRaw() {
+    if (g_ccRawFor == g_all.size() && !g_ccRawIndex.empty()) return;
+    g_ccRawIndex.clear();
+    for (size_t i = 0; i < g_all.size(); ++i) g_ccRawIndex[ccRawPath(g_all[i])] = (int)i;
+    g_ccRawFor = g_all.size();
+}
+
+static int ccAssetIndex(const std::string& path) {
+    ccIndexRaw();
+    auto it = g_ccRawIndex.find(path);
+    if (it != g_ccRawIndex.end()) return it->second;
+    for (size_t i = 0; i < g_all.size(); ++i) if (g_all[i].path == path) return (int)i;
+    return -1;
+}
+
+static std::vector<std::string> ccAssetPaths() {
+    ccIndexRaw();
+    std::vector<std::string> v;
+    v.reserve(g_all.size());
+    for (const Entry& e : g_all) v.push_back(ccRawPath(e));
+    return v;
+}
+
+static bool ccRead(const std::string& path, Bytes& out) {
+    int i = ccAssetIndex(path);
+    if (i < 0) return false;
+    const Entry& e = g_all[i];
+    if (g_lib.entries[e.lib].rr3Wrapped) {
+        std::string disk = ccDiskFile(e);
+        if (!disk.empty()) return nfsnl::readFile(disk, out);
+    }
+    return readAsset(e, out);
+}
+
+// an output's entry among the files opened: by its depot path at the end
+static int ccOutputIndex(const std::string& rel) {
+    int i = ccAssetIndex(rel);
+    if (i >= 0) return i;
+    ccIndexRaw();
+    for (const auto& kv : g_ccRawIndex) {
+        std::string p = kv.first;
+        for (char& c : p) if (c == '\\') c = '/';
+        if (p.size() > rel.size() && p.compare(p.size() - rel.size(), rel.size(), rel) == 0 && p[p.size() - rel.size() - 1] == '/')
+            return kv.second;
+    }
+    return -1;
+}
+
+// Where the game's depot folder is on disk: a file opened, less its path in
+// the depot. "" when the files came out of an archive.
+static std::string ccDepotRoot(const std::vector<nfsnl::Rr3CarOutput>& outs) {
+    for (const nfsnl::Rr3CarOutput& o : outs) {
+        int i = ccOutputIndex(o.path);
+        if (i < 0) continue;
+        std::string disk = ccDiskFile(g_all[i]);
+        if (disk.empty()) continue;
+        std::string d = disk, rel = o.path;
+        for (char& c : d) if (c == '\\') c = '/';
+        if (d.size() > rel.size() && d.compare(d.size() - rel.size(), rel.size(), rel) == 0)
+            return disk.substr(0, disk.size() - rel.size());
+    }
+    return std::string();
+}
+
+// Everything written into the game's own folder: a file it has is kept once
+// as .bak and replaced, a new one is put where the game looks for it. The
+// list says which is which.
+static bool ccWriteIntoGame(const std::vector<nfsnl::Rr3CarOutput>& outs, std::string& list, int& replaced, int& added) {
+    replaced = added = 0;
+    std::string root = ccDepotRoot(outs);
+    for (const nfsnl::Rr3CarOutput& o : outs) {
+        int i = ccOutputIndex(o.path);
+        std::string target = i >= 0 ? ccDiskFile(g_all[i]) : std::string();
+        bool exists = !target.empty();
+        if (!exists) {
+            if (root.empty()) { list += "NOT WRITTEN (no folder for it): " + o.path + "\n"; continue; }
+            target = root + o.path;
+        }
+        for (char& c : target) if (c == '/') c = '\\';
+        Bytes old;
+        if (exists && nfsnl::readFile(target, old)) {
+            std::string bak = target + ".bak";
+            Bytes have;
+            if (!nfsnl::readFile(bak, have)) nfsnl::writeFile(bak, old);
+        }
+        nfsnl::makeDirsFor(target);
+        if (!nfsnl::writeFile(target, o.data)) { list += "COULD NOT WRITE: " + target + "\n"; continue; }
+        g_ccWrittenTo[o.path] = target;
+        list += (exists ? "REPLACED  " : "NEW       ") + target + "\n";
+        (exists ? replaced : added)++;
+    }
+    return true;
+}
+
+static bool ccWriteToFolder(const std::vector<nfsnl::Rr3CarOutput>& outs, const std::string& dir, std::string& list, int& written) {
+    written = 0;
+    for (const nfsnl::Rr3CarOutput& o : outs) {
+        std::string target = dir + "\\" + o.path;
+        for (char& c : target) if (c == '/') c = '\\';
+        DWORD a = GetFileAttributesW(widen(target).c_str());
+        bool had = a != INVALID_FILE_ATTRIBUTES;
+        nfsnl::makeDirsFor(target);
+        if (!nfsnl::writeFile(target, o.data)) { list += "COULD NOT WRITE: " + target + "\n"; continue; }
+        g_ccWrittenTo[o.path] = target;
+        list += (had ? "REPLACED  " : "NEW       ") + target + "\n";
+        ++written;
+    }
+    return true;
+}
+
+// what was written, where: a window of its own, and the report
+static void ccShowWritten(HWND owner, const std::string& title, const std::string& head, const std::string& list) {
+    std::string shown = head + "\n\n" + list;
+    // a message box is not a scroller: the first lines there, all of them in the report
+    size_t lines = 0, cut = std::string::npos;
+    for (size_t k = 0; k < shown.size(); ++k) if (shown[k] == '\n' && ++lines == 40) { cut = k; break; }
+    if (cut != std::string::npos) shown = shown.substr(0, cut) + "\n... (the whole list is in the report box)";
+    MessageBoxW(owner, widen(shown).c_str(), widen(title).c_str(), MB_ICONINFORMATION);
+}
+
+// a car's data file: through the game's car list (the model folder and the
+// data file are not always named alike), else by name
+static std::string ccDataPath(const std::string& modelFolder) {
+    for (const nfsnl::Rr3CarInfo& c : g_ccInfos) {
+        if (c.modelFolder != modelFolder) continue;
+        std::string want = "/" + c.dataFile;
+        for (const Entry& e : g_all) {
+            std::string p = e.path;
+            for (char& ch : p) if (ch == '\\') ch = '/';
+            if (p.size() >= want.size() && p.compare(p.size() - want.size(), want.size(), want) == 0) return e.path;
+        }
+    }
+    return nfsnl::rr3CarDataPathFor(modelFolder, ccAssetPaths());
+}
+
+static const nfsnl::Rr3CarInfo* ccInfo(const std::string& modelFolder) {
+    for (const nfsnl::Rr3CarInfo& c : g_ccInfos) if (c.modelFolder == modelFolder) return &c;
+    return nullptr;
+}
+
+// The list view, by its wide messages: BUILD.bat compiles without UNICODE,
+// where the ListView_ macros would send the ANSI ones.
+static const UINT kLvmDeleteAll = 0x1009, kLvmGetNextItem = 0x100C, kLvmSetItemState = 0x102B,
+                  kLvmSetExStyle = 0x1036, kLvmInsertItemW = 0x104D, kLvmInsertColumnW = 0x1061,
+                  kLvmSetItemTextW = 0x1074;
+static const UINT kLvnItemChanged = (UINT)(0U - 101U);
+static void lvInsertColumn(HWND lv, int i, int width, const wchar_t* text) {
+    LVCOLUMNW col{};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.cx = width;
+    col.pszText = (LPWSTR)text;
+    SendMessageW(lv, kLvmInsertColumnW, (WPARAM)i, (LPARAM)&col);
+}
+static void lvSetText(HWND lv, int row, int sub, const std::wstring& text) {
+    std::wstring t = text;
+    LVITEMW it{};
+    it.iSubItem = sub;
+    it.pszText = &t[0];
+    SendMessageW(lv, kLvmSetItemTextW, (WPARAM)row, (LPARAM)&it);
+}
+static int lvSelected(HWND lv) { return (int)SendMessageW(lv, kLvmGetNextItem, (WPARAM)-1, LVNI_SELECTED); }
+
+static std::string ccField(const std::string& key) {
+    for (const nfsnl::Rr3CarField& f : g_ccFields) if (f.key == key) return f.value;
+    return std::string();
+}
+
+static void ccFillList() {
+    SendMessageW(g_ccList, kLvmDeleteAll, 0, 0);
+    for (size_t k = 0; k < g_ccFields.size(); ++k) {
+        const nfsnl::Rr3CarField& f = g_ccFields[k];
+        std::wstring label = widen(f.label);
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        it.iItem = (int)k;
+        it.pszText = &label[0];
+        SendMessageW(g_ccList, kLvmInsertItemW, 0, (LPARAM)&it);
+        auto e = g_ccEdits.find(f.key);
+        lvSetText(g_ccList, (int)k, 1, widen(e == g_ccEdits.end() ? f.value : e->second));
+        lvSetText(g_ccList, (int)k, 2, widen(e == g_ccEdits.end() ? std::string() : f.value));
+    }
+}
+
+// the texture file a new livery gets: <car>_ext_<name>, as the game names its own
+static std::string ccLiveryTexture(const std::string& name);
+static std::string ccNewFolder();
+
+static void ccFillLiveries() {
+    SendMessageW(g_ccLivList, LB_RESETCONTENT, 0, 0);
+    // the car's own: kept as they are (a new car keeps them only when no new ones are added)
+    for (size_t k = 0; k < g_ccOwn.size(); ++k) {
+        const CcOwnLivery& o = g_ccOwn[k];
+        char b[700];
+        snprintf(b, sizeof(b), "%02u  %s   #%02X%02X%02X   %s", (unsigned)(k + 1),
+                 o.name.empty() ? "(the colour's own name)" : o.name.c_str(), o.rgb[0], o.rgb[1], o.rgb[2], o.texture.c_str());
+        SendMessageW(g_ccLivList, LB_ADDSTRING, 0, (LPARAM)widen(b).c_str());
+    }
+    for (size_t k = 0; k < g_ccLivs.size(); ++k) {
+        const nfsnl::Rr3NewLivery& L = g_ccLivs[k];
+        char b[700];
+        snprintf(b, sizeof(b), "NEW %s   #%02X%02X%02X   %s.etc.dds.z   %s", L.name.c_str(), L.rgb[0], L.rgb[1], L.rgb[2],
+                 ccLiveryTexture(L.name).c_str(),
+                 L.picture.empty() ? "(painted in the colour)" : ("(from " + nfsnl::baseName(L.picture) + ")").c_str());
+        SendMessageW(g_ccLivList, LB_ADDSTRING, 0, (LPARAM)widen(b).c_str());
+    }
+}
+
+static void ccShowLivColour() {
+    char b[48];
+    snprintf(b, sizeof(b), "Colour #%02X%02X%02X...", g_ccLivRgb[0], g_ccLivRgb[1], g_ccLivRgb[2]);
+    SetWindowTextW(g_ccLivColour, widen(b).c_str());
+    SetWindowTextW(g_ccLivPic, g_ccLivPicPath.empty() ? L"Own texture (optional)..." : widen("Own texture: " + nfsnl::baseName(g_ccLivPicPath)).c_str());
+}
+
+static std::string ccSlug(const std::string& s) {
+    std::string o;
+    for (char c : s) {
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) o += c;
+        else if (!o.empty() && o.back() != '_') o += '_';
+    }
+    while (!o.empty() && o.back() == '_') o.pop_back();
+    return o;
+}
+
+static std::string ccLiveryTexture(const std::string& name) {
+    std::string folder = g_ccAdding ? ccNewFolder() : g_ccCarFolder;
+    std::string sl = ccSlug(name);
+    return folder + "_ext_" + (sl.empty() ? std::string("new") : sl);
+}
+
+static void ccShowLiveryTexture() {
+    std::string n = ccText(g_ccLivName);
+    SetWindowTextW(g_ccLivTexLbl, n.empty() ? L"" : widen("Its texture: livery/" + ccLiveryTexture(n) + ".etc.dds.z").c_str());
+}
+
+// the new car's folder, from its year, brand and name
+static std::string ccNewFolder() {
+    std::string year = ccText(g_ccYear), brand;
+    int b = (int)SendMessageW(g_ccBrand, CB_GETCURSEL, 0, 0);
+    if (b >= 0 && (size_t)b < g_ccBrands.size()) brand = g_ccBrands[b].second;
+    std::string f = ccSlug(year) + "_" + ccSlug(brand) + "_" + ccSlug(ccText(g_ccName));
+    return f;
+}
+
+static void ccShowFolder() {
+    if (!g_ccAdding) { SetWindowTextW(g_ccFolderLbl, L""); return; }
+    SetWindowTextW(g_ccFolderLbl, widen("The game will keep it in vehicles/" + ccNewFolder() + "/").c_str());
+}
+
+// the steps of the mode: changing a car of the game has no Look step
+static std::vector<int> ccSteps() { return g_ccAdding ? std::vector<int>{ 0, 1, 2, 3 } : std::vector<int>{ 0, 1, 3 }; }
+
+static void ccLayoutSteps() {
+    std::vector<int> v = ccSteps();
+    RECT rc;
+    GetClientRect(g_ccWnd, &rc);
+    int cw = rc.right, n = (int)v.size(), sw = (cw - 32 - (n - 1) * 8) / n;
+    static const wchar_t* names[4] = { L"Car", L"Performance", L"Look", L"Liveries & sound" };
+    for (int k = 0; k < 4; ++k) ShowWindow(g_ccStepBtn[k], SW_HIDE);
+    RECT r;
+    GetWindowRect(g_ccStepBtn[0], &r);
+    POINT p = { r.left, r.top };
+    ScreenToClient(g_ccWnd, &p);
+    for (int k = 0; k < n; ++k) {
+        std::wstring t = std::to_wstring(k + 1) + L"  " + names[v[k]];
+        SetWindowTextW(g_ccStepBtn[v[k]], t.c_str());
+        MoveWindow(g_ccStepBtn[v[k]], 16 + k * (sw + 8), p.y, sw, 32, TRUE);
+        ShowWindow(g_ccStepBtn[v[k]], SW_SHOW);
+    }
+}
+
+static void ccShowStep(int step) {
+    std::vector<int> v = ccSteps();
+    if (std::find(v.begin(), v.end(), step) == v.end()) step = v.back();
+    g_ccStep = step < 0 ? 0 : step > 3 ? 3 : step;
+    for (int p = 0; p < 4; ++p)
+        for (HWND h : g_ccPage[p]) ShowWindow(h, p == g_ccStep ? SW_SHOW : SW_HIDE);
+    if (g_ccStep == 1) {
+        for (HWND h : g_ccSimple) ShowWindow(h, g_ccShowAll ? SW_HIDE : SW_SHOW);
+        for (HWND h : g_ccAdvanced) ShowWindow(h, g_ccShowAll ? SW_SHOW : SW_HIDE);
+        SetWindowTextW(g_ccAllBtn, g_ccShowAll ? L"Back to the main figures" : L"All figures...");
+    }
+    static const wchar_t* titles[4] = { L"the car", L"performance", L"models and textures", L"liveries and sound" };
+    size_t at = std::find(v.begin(), v.end(), g_ccStep) - v.begin();
+    std::wstring tt = L"Step " + std::to_wstring(at + 1) + L" of " + std::to_wstring(v.size()) + L" - " + titles[g_ccStep];
+    SetWindowTextW(g_ccStepTitle, tt.c_str());
+    g_ccTheme.active.clear();
+    g_ccTheme.active.insert(g_ccStepBtn[g_ccStep]);
+    for (HWND b : g_ccStepBtn) InvalidateRect(b, nullptr, TRUE);
+    EnableWindow(g_ccBack, at > 0);
+    EnableWindow(g_ccNext, at + 1 < v.size());
+}
+
+static void ccStepBy(int d) {
+    std::vector<int> v = ccSteps();
+    int at = (int)(std::find(v.begin(), v.end(), g_ccStep) - v.begin()) + d;
+    if (at < 0) at = 0;
+    if (at >= (int)v.size()) at = (int)v.size() - 1;
+    ccShowStep(v[at]);
+}
+
+static void ccSetMode(bool adding) {
+    g_ccAdding = adding;
+    SendMessageW(g_ccOver, BM_SETCHECK, adding ? 0 : BST_CHECKED, 0);
+    SendMessageW(g_ccAdd, BM_SETCHECK, adding ? BST_CHECKED : 0, 0);
+    SetWindowTextW(g_ccFinish, adding ? L"Create the car..." : L"Save into the game");
+    ShowWindow(g_ccFolderBtn, SW_HIDE);
+    EnableWindow(g_ccKeep, TRUE);
+    char b[300];
+    snprintf(b, sizeof(b), adding ? "The starting car's liveries (%d). Add your own and the new car gets yours instead:"
+                                  : "The car's liveries (%d). Add new ones below - they come after these:", g_ccOwnLiveries);
+    SetWindowTextW(g_ccLivNote, widen(b).c_str());
+    ccShowFolder();
+    if (g_ccWnd && g_ccStepBtn[0]) { ccLayoutSteps(); ccShowStep(g_ccStep); }
+}
+
+static void ccFillSimple() {
+    for (CcFigure& f : g_ccFig) SetWindowTextW(f.edit, widen(ccField(f.key)).c_str());
+    std::string cls = ccField("class"), drive = ccField("drivetrain");
+    SendMessageW(g_ccClass, CB_SETCURSEL, 0, 0);
+    for (int k = 0; k < 3; ++k) if (cls == kCcClasses[k]) SendMessageW(g_ccClass, CB_SETCURSEL, k, 0);
+    SendMessageW(g_ccDrive, CB_SETCURSEL, 0, 0);
+    for (int k = 0; k < 4; ++k) if (drive == kCcDrives[k]) SendMessageW(g_ccDrive, CB_SETCURSEL, k, 0);
+    std::string asp = ccField("aspiration");
+    SendMessageW(g_ccAsp, CB_SETCURSEL, 0, 0);
+    for (int k = 0; k < 4; ++k) if (asp == kCcAsp[k]) SendMessageW(g_ccAsp, CB_SETCURSEL, k, 0);
+    SendMessageW(g_ccUpg, CB_SETCURSEL, 0, 0);
+}
+
+static void ccLoadCar() {
+    g_ccHave = false;
+    g_ccFields.clear();
+    g_ccEdits.clear();
+    g_ccOwnLiveries = 0;
+    g_ccOwn.clear();
+    int sel = (int)SendMessageW(g_ccCar, CB_GETCURSEL, 0, 0);
+    if (sel < 0 || (size_t)sel >= g_ccCars.size()) { ccFillList(); return; }
+    std::string car = g_ccCars[sel];
+    g_ccCarFolder = car;
+    std::string dataPath = ccDataPath(car);
+    Bytes raw;
+    if (dataPath.empty() || !ccRead(dataPath, raw)) {
+        ccReport("No data file for " + car + " in vehicles/data among the files opened - open the game's whole folder, "
+                 "vehicles/data included.");
+    } else if (!nfsnl::rr3CarRead(raw.data(), raw.size(), g_ccData)) {
+        ccReport(nfsnl::baseName(dataPath) + ": " + g_ccData.why);
+    } else {
+        g_ccHave = true;
+        g_ccFields = nfsnl::rr3CarFields(g_ccData);
+    }
+    // its liveries, counted
+    for (const Entry& e : g_all) {
+        std::string p = e.path;
+        for (char& c : p) if (c == '\\') c = '/';
+        std::string want = "/" + car + ".liveries.bin.nct";
+        if (p.size() > want.size() && p.compare(p.size() - want.size(), want.size(), want) == 0) {
+            Bytes lr, lp;
+            if (readAsset(e, lr)) {
+                nfsnl::nctTransform(lr.data(), lr.size(), lp);
+                nfsnl::Rr3Liveries L;
+                if (nfsnl::rr3LiveriesRead(lp.data(), lp.size(), L)) {
+                    g_ccOwnLiveries = (int)L.liveries.size();
+                    for (const nfsnl::Rr3Livery& v : L.liveries) {
+                        CcOwnLivery o;
+                        o.name = v.display;
+                        memcpy(o.rgb, v.rgb, 3);
+                        for (const auto& ov : v.overrides)
+                            if (ov.second.compare(0, 7, "livery/") == 0) {
+                                std::string t = ov.second.substr(7);
+                                o.texture = t.substr(0, t.find('.')) + ".etc.dds.z";
+                                break;
+                            }
+                        g_ccOwn.push_back(o);
+                    }
+                }
+            }
+        }
+    }
+    // step 1: its name, year and brand
+    SetWindowTextW(g_ccName, widen(g_ccAdding ? ccField("model") + " (new)" : ccField("model")).c_str());
+    SetWindowTextW(g_ccYear, widen(ccField("year")).c_str());
+    if (const nfsnl::Rr3CarInfo* in = ccInfo(car))
+        for (size_t k = 0; k < g_ccBrands.size(); ++k)
+            if (g_ccBrands[k].first == in->makeKey) SendMessageW(g_ccBrand, CB_SETCURSEL, (WPARAM)k, 0);
+    ccFillSimple();
+    ccFillList();
+    ccSetMode(g_ccAdding);
+    ccFillLiveries();
+    if (g_ccHave)
+        ccReport("Starting from the " + ccField("year") + " " + ccField("make") + " " + ccField("model") + " (" +
+                 nfsnl::baseName(dataPath) + ", " + std::to_string(g_ccOwnLiveries) + " liveries). Its figures are filled in; "
+                 "change what you like, step by step.");
+}
+
+static void ccSet(HWND hwnd) {
+    int row = lvSelected(g_ccList);
+    if (row < 0 || (size_t)row >= g_ccFields.size()) {
+        MessageBoxW(hwnd, L"Pick a figure in the list first.", L"Car creator", MB_ICONINFORMATION);
+        return;
+    }
+    const nfsnl::Rr3CarField& f = g_ccFields[row];
+    std::string v = ccText(g_ccValue);
+    if (f.key == "id" || f.key == "appearance" || f.key == "sound") {
+        MessageBoxW(hwnd, f.key == "sound" ? L"Choose the engine sound in step 4 - the whole set is taken from that car."
+                                           : L"The id and appearance are the game's own - a new car gets new ones by itself.",
+                    L"Car creator", MB_ICONINFORMATION);
+        return;
+    }
+    nfsnl::Rr3Car probe = g_ccData;
+    std::string why;
+    if (!nfsnl::rr3CarSet(probe, f.key, v, why)) {
+        MessageBoxW(hwnd, widen(why).c_str(), L"Car creator", MB_ICONWARNING);
+        return;
+    }
+    if (v == f.value) g_ccEdits.erase(f.key);
+    else g_ccEdits[f.key] = v;
+    ccFillList();
+    LVITEMW st{};
+    st.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    st.state = LVIS_SELECTED | LVIS_FOCUSED;
+    SendMessageW(g_ccList, kLvmSetItemState, (WPARAM)row, (LPARAM)&st);
+}
+
+// every figure that differs from the starting car: the main boxes, then the
+// full list (which wins where both say something)
+static bool ccCollectFields(HWND hwnd, std::map<std::string, std::string>& out) {
+    // a value typed into the box but never set: it counts, as if set (the
+    // aspiration typed in the full list was lost this way)
+    {
+        int row = lvSelected(g_ccList);
+        if (row >= 0 && (size_t)row < g_ccFields.size() && g_ccValue) {
+            const nfsnl::Rr3CarField& f = g_ccFields[row];
+            std::string v = ccText(g_ccValue);
+            auto e = g_ccEdits.find(f.key);
+            std::string shown = e == g_ccEdits.end() ? f.value : e->second;
+            if (!v.empty() && v != shown && f.key != "id" && f.key != "appearance" && f.key != "sound") {
+                nfsnl::Rr3Car probe = g_ccData;
+                std::string why;
+                if (!nfsnl::rr3CarSet(probe, f.key, v, why)) {
+                    MessageBoxW(hwnd, widen(why).c_str(), L"Car creator", MB_ICONWARNING);
+                    ccShowStep(1);
+                    return false;
+                }
+                if (v == f.value) g_ccEdits.erase(f.key);
+                else g_ccEdits[f.key] = v;
+            }
+        }
+    }
+    for (const CcFigure& f : g_ccFig) {
+        std::string v = ccText(f.edit);
+        if (v.empty() || v == ccField(f.key)) continue;
+        nfsnl::Rr3Car probe = g_ccData;
+        std::string why;
+        if (!nfsnl::rr3CarSet(probe, f.key, v, why)) {
+            MessageBoxW(hwnd, widen(why).c_str(), L"Car creator", MB_ICONWARNING);
+            ccShowStep(1);
+            return false;
+        }
+        out[f.key] = v;
+    }
+    int c = (int)SendMessageW(g_ccClass, CB_GETCURSEL, 0, 0);
+    if (c >= 0 && c < 3 && ccField("class") != kCcClasses[c]) out["class"] = kCcClasses[c];
+    int d = (int)SendMessageW(g_ccDrive, CB_GETCURSEL, 0, 0);
+    if (d >= 0 && d < 4 && ccField("drivetrain") != kCcDrives[d]) out["drivetrain"] = kCcDrives[d];
+    int a = (int)SendMessageW(g_ccAsp, CB_GETCURSEL, 0, 0);
+    if (a >= 0 && a < 4 && ccField("aspiration") != kCcAsp[a]) out["aspiration"] = kCcAsp[a];
+    int u = (int)SendMessageW(g_ccUpg, CB_GETCURSEL, 0, 0);
+    if (u > 0 && (size_t)(u - 1) < g_ccUpgrades.size()) out["handling"] = g_ccUpgrades[u - 1];
+    for (const auto& kv : g_ccEdits) out[kv.first] = kv.second;
+    return true;
+}
+
+static bool ccPictures(HWND hwnd, std::vector<std::string>& pictures) {
+    std::string texDir = ccText(g_ccTex);
+    if (texDir.empty()) return true;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((widen(texDir) + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::string name = narrow(fd.cFileName), e = nfsnl::extensionOf(name);
+            if (e == "png" || e == "jpg" || e == "jpeg" || e == "bmp" || e == "tga" || e == "tif" || e == "tiff")
+                pictures.push_back(texDir + "\\" + name);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (pictures.empty()) {
+        MessageBoxW(hwnd, L"No pictures (PNG, JPG, BMP, TGA) in the textures folder.", L"Car creator", MB_ICONWARNING);
+        ccShowStep(2);
+        return false;
+    }
+    return true;
+}
+
+static bool ccSoundFrom(HWND hwnd, Bytes& out) {
+    int s = (int)SendMessageW(g_ccSound, CB_GETCURSEL, 0, 0);
+    if (s > 0 && (size_t)(s - 1) < g_ccCars.size()) {
+        std::string p = ccDataPath(g_ccCars[s - 1]);
+        if (p.empty() || !ccRead(p, out)) {
+            MessageBoxW(hwnd, widen(g_ccCars[s - 1] + " has no data file in the files opened - its sound cannot be taken.").c_str(),
+                        L"Car creator", MB_ICONWARNING);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ccRun(HWND hwnd, std::vector<nfsnl::Rr3CarOutput>& outs, std::string& report) {
+    int sel = (int)SendMessageW(g_ccCar, CB_GETCURSEL, 0, 0);
+    if (sel < 0 || (size_t)sel >= g_ccCars.size()) {
+        MessageBoxW(hwnd, L"Choose the car to start from in step 1.", L"Car creator", MB_ICONINFORMATION);
+        ccShowStep(0);
+        return false;
+    }
+    std::map<std::string, std::string> fields;
+    if (!ccCollectFields(hwnd, fields)) return false;
+    std::string name = ccText(g_ccName), year = ccText(g_ccYear);
+    int b = (int)SendMessageW(g_ccBrand, CB_GETCURSEL, 0, 0);
+    std::string makeKey = b >= 0 && (size_t)b < g_ccBrands.size() ? g_ccBrands[b].first : std::string();
+    std::string make = b >= 0 && (size_t)b < g_ccBrands.size() ? g_ccBrands[b].second : std::string();
+    if (g_ccAdding) {
+        if (name.empty() || year.size() != 4 || !isdigit((unsigned char)year[0])) {
+            MessageBoxW(hwnd, L"Give the new car its name and its year (four digits) in step 1.", L"Car creator", MB_ICONINFORMATION);
+            ccShowStep(0);
+            return false;
+        }
+        nfsnl::Rr3NewCarJob job;
+        job.donor = g_ccCars[sel];
+        job.folder = ccNewFolder();
+        job.modelName = name;
+        job.makeKey = makeKey;
+        job.make = make;
+        job.fields = fields;
+        if (fields.count("handling")) { job.upgrades = fields["handling"]; job.fields.erase("handling"); }
+        if (!ccSoundFrom(hwnd, job.soundFrom)) return false;
+        job.modelPath = ccText(g_ccModel);
+        job.interiorPath = ccText(g_ccInt);
+        if (!ccPictures(hwnd, job.pictures)) return false;
+        job.liveries = g_ccLivs;
+        job.allLods = SendMessageW(g_ccLods, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        job.keepListedMd5 = SendMessageW(g_ccKeep, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        bool ok = nfsnl::rr3AddCar(job, ccAssetPaths(), ccRead, outs, report);
+        SetCursor(old);
+        return ok;
+    }
+    nfsnl::Rr3CarJob job;
+    job.car = g_ccCars[sel];
+    job.fields = fields;
+    if (!name.empty() && name != ccField("model")) job.fields["model"] = name;
+    if (!year.empty() && year != ccField("year")) job.fields["year"] = year;
+    if (!makeKey.empty() && makeKey != ccField("make_key")) { job.fields["make_key"] = makeKey; job.fields["make"] = make; }
+    if (!ccSoundFrom(hwnd, job.soundFrom)) return false;
+    job.liveries = g_ccLivs;
+    if (job.fields.empty() && job.soundFrom.empty() && job.liveries.empty()) {
+        MessageBoxW(hwnd, L"Nothing to change yet: change a figure, add a livery or pick an engine sound.",
+                    L"Car creator", MB_ICONINFORMATION);
+        return false;
+    }
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    bool ok = nfsnl::rr3CreateCar(job, ccAssetPaths(), ccRead, outs, report);
+    SetCursor(old);
+    return ok || !outs.empty();
+}
+
+static void ccWriteFolder(HWND hwnd, std::vector<nfsnl::Rr3CarOutput>& outs, std::string& report) {
+    std::string dir;
+    if (!pickFolder(hwnd, g_ccAdding
+            ? L"Where to write the new car's files (laid out like the game's folder - copy them over it)"
+            : L"Write the car's files into this folder (as the game lays them out)", dir)) {
+        ccReport(report);
+        return;
+    }
+    int n = 0;
+    for (const nfsnl::Rr3CarOutput& o : outs) {
+        std::string target = dir + "\\" + o.path;
+        for (char& c : target) if (c == '/') c = '\\';
+        nfsnl::makeDirsFor(target);
+        if (nfsnl::writeFile(target, o.data)) ++n;
+        else report += "Could not write " + target + "\n";
+    }
+    report += "\n" + std::to_string(n) + " file(s) written under " + dir +
+              ", laid out like the game's folder - copy them over the game's files.";
+    ccReport(report);
+    logLine("car creator: %d file(s) written to %s", n, dir.c_str());
+}
+
+// After a car is saved: its points (lights, exhausts, wheels ...) can be put
+// right on the model it now has
+static void ccOfferPointsEditor(HWND hwnd, const std::vector<nfsnl::Rr3CarOutput>& outs) {
+    std::string modelRel, pointsRel;
+    for (const nfsnl::Rr3CarOutput& o : outs) {
+        std::string l = o.path;
+        for (char& c : l) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (l.size() > 6 && l.compare(l.size() - 6, 6, "_a.m3g") == 0 && l.find("_int_a.m3g") == std::string::npos &&
+            l.compare(0, 9, "vehicles/") == 0 && modelRel.empty()) modelRel = o.path;
+    }
+    if (modelRel.empty()) return;                        // no model of its own: nothing new to fit
+    std::string car = nfsnl::rr3CarNameFor(modelRel);
+    std::string dir = modelRel.substr(0, modelRel.find_last_of('/') + 1);
+    pointsRel = dir + car + ".points";
+    Bytes model, points;
+    for (const nfsnl::Rr3CarOutput& o : outs) {
+        if (o.path == modelRel) model = o.data;
+        if (o.path == pointsRel) points = o.data;
+    }
+    if (points.empty() && !ccRead(pointsRel, points)) return;
+    auto it = g_ccWrittenTo.find(pointsRel);
+    if (it == g_ccWrittenTo.end()) return;
+    int a = MessageBoxW(hwnd, L"Do you want to edit the positions of the car's points?\n\n"
+                              L"Headlights and brake lights, exhausts (the flames), wheels, mirrors and the rest are "
+                              L"places on the car kept in its .points file. A new model usually needs them moved.\n\n"
+                              L"Yes - open them on the new model, pick one and move it.\nNo - keep them as they are.",
+                        L"Car points", MB_YESNO | MB_ICONQUESTION);
+    Bytes shared;
+    for (const nfsnl::Rr3CarOutput& o : outs) if (o.path == dir + car + "_shared.m3g") shared = o.data;
+    if (shared.empty()) readLibraryFile(dir + car + "_shared.m3g", shared);
+    if (a == IDYES) openPointsEditor(hwnd, model, points, car, it->second, shared);
+}
+
+static LRESULT CALLBACK CarCreatorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    LRESULT themed;
+    if (ttMessage(g_ccTheme, hwnd, msg, wp, lp, themed)) return themed;
+    switch (msg) {
+    case WM_NOTIFY: {
+        NMHDR* nh = (NMHDR*)lp;
+        if (nh->idFrom == IDC_CC_LIST && nh->code == kLvnItemChanged) {
+            NMLISTVIEW* nl = (NMLISTVIEW*)lp;
+            if ((nl->uNewState & LVIS_SELECTED) && nl->iItem >= 0 && (size_t)nl->iItem < g_ccFields.size()) {
+                const nfsnl::Rr3CarField& f = g_ccFields[nl->iItem];
+                auto e = g_ccEdits.find(f.key);
+                SetWindowTextW(g_ccValue, widen(e == g_ccEdits.end() ? f.value : e->second).c_str());
+                SetWindowTextW(g_ccLabel, widen(f.label + ":").c_str());
+            }
+        }
+        break;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDC_CC_CAR:
+            if (HIWORD(wp) == CBN_SELCHANGE) ccLoadCar();
+            return 0;
+        case IDC_CC_NAME:
+        case IDC_CC_YEAR:
+            if (HIWORD(wp) == EN_CHANGE) { ccShowFolder(); ccShowLiveryTexture(); }
+            return 0;
+        case IDC_CC_LIVNAME:
+            if (HIWORD(wp) == EN_CHANGE) ccShowLiveryTexture();
+            return 0;
+        case IDC_CC_BRAND:
+            if (HIWORD(wp) == CBN_SELCHANGE) ccShowFolder();
+            return 0;
+        case IDC_CC_OVER:
+            ccSetMode(false);
+            ccLoadCar();
+            return 0;
+        case IDC_CC_ADD:
+            ccSetMode(true);
+            ccLoadCar();
+            return 0;
+        case IDC_CC_BACK: ccStepBy(-1); return 0;
+        case IDC_CC_NEXT: ccStepBy(1); return 0;
+        case IDC_CC_STEP0: case IDC_CC_STEP1: case IDC_CC_STEP2: case IDC_CC_STEP3:
+            ccShowStep(LOWORD(wp) - IDC_CC_STEP0);
+            return 0;
+        case IDC_CC_ALL:
+            g_ccShowAll = !g_ccShowAll;
+            ccShowStep(1);
+            return 0;
+        case IDC_CC_SET:
+            ccSet(hwnd);
+            return 0;
+        case IDC_CC_UNDO:
+            g_ccEdits.clear();
+            ccFillList();
+            return 0;
+        case IDC_CC_LIVCOLOUR: {
+            CHOOSECOLORW cc{};
+            cc.lStructSize = sizeof(cc);
+            cc.hwndOwner = hwnd;
+            cc.lpCustColors = g_ccCustom;
+            cc.rgbResult = RGB(g_ccLivRgb[0], g_ccLivRgb[1], g_ccLivRgb[2]);
+            cc.Flags = CC_RGBINIT | CC_FULLOPEN;
+            if (ChooseColorW(&cc)) {
+                g_ccLivRgb[0] = GetRValue(cc.rgbResult);
+                g_ccLivRgb[1] = GetGValue(cc.rgbResult);
+                g_ccLivRgb[2] = GetBValue(cc.rgbResult);
+                ccShowLivColour();
+            }
+            return 0;
+        }
+        case IDC_CC_LIVPIC: {
+            wchar_t file[MAX_PATH] = L"";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"Pictures (*.png;*.jpg;*.jpeg;*.bmp;*.tga)\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All files\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrTitle = L"The livery's body texture (laid out like the model's UVs) - Cancel for none";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+            g_ccLivPicPath = GetOpenFileNameW(&ofn) ? narrow(std::wstring(file)) : std::string();
+            ccShowLivColour();
+            return 0;
+        }
+        case IDC_CC_LIVADD: {
+            nfsnl::Rr3NewLivery L;
+            L.name = ccText(g_ccLivName);
+            if (L.name.empty()) {
+                MessageBoxW(hwnd, L"Type the livery's name first (the game shows it).", L"Car creator", MB_ICONINFORMATION);
+                return 0;
+            }
+            memcpy(L.rgb, g_ccLivRgb, 3);
+            L.picture = g_ccLivPicPath;
+            for (const nfsnl::Rr3NewLivery& o : g_ccLivs)
+                if (ccLiveryTexture(o.name) == ccLiveryTexture(L.name)) {
+                    MessageBoxW(hwnd, L"There is already a new livery of that name.", L"Car creator", MB_ICONINFORMATION);
+                    return 0;
+                }
+            g_ccLivs.push_back(L);
+            SetWindowTextW(g_ccLivName, L"");
+            g_ccLivPicPath.clear();
+            ccShowLivColour();
+            ccFillLiveries();
+            return 0;
+        }
+        case IDC_CC_LIVDEL: {
+            int i = (int)SendMessageW(g_ccLivList, LB_GETCURSEL, 0, 0) - (int)g_ccOwn.size();
+            if (i >= 0 && (size_t)i < g_ccLivs.size()) g_ccLivs.erase(g_ccLivs.begin() + i);
+            else MessageBoxW(hwnd, L"Pick one of the NEW liveries - the car's own stay as they are.", L"Car creator", MB_ICONINFORMATION);
+            ccFillLiveries();
+            return 0;
+        }
+        case IDC_CC_MODELB:
+        case IDC_CC_INTB: {
+            wchar_t file[MAX_PATH] = L"";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"3D model (*.obj;*.fbx)\0*.obj;*.fbx\0All files\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrTitle = LOWORD(wp) == IDC_CC_MODELB ? L"The car's body (OBJ or FBX)" : L"The car's cockpit (OBJ or FBX)";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+            if (GetOpenFileNameW(&ofn)) SetWindowTextW(LOWORD(wp) == IDC_CC_MODELB ? g_ccModel : g_ccInt, file);
+            return 0;
+        }
+        case IDC_CC_PREVIEW: {
+            // the body built on the chosen car's frame, shown in the main
+            // window's 3D view (and pending, so Save would write it there)
+            int sel = (int)SendMessageW(g_ccCar, CB_GETCURSEL, 0, 0);
+            std::string model = ccText(g_ccModel);
+            if (sel < 0 || (size_t)sel >= g_ccCars.size() || model.empty()) {
+                MessageBoxW(hwnd, L"Choose the car (step 1) and the body model first.", L"Car creator", MB_ICONINFORMATION);
+                return 0;
+            }
+            std::string leaf = g_ccCars[sel] + "_a.m3g";
+            int idx = -1;
+            for (size_t i = 0; i < g_all.size() && idx < 0; ++i) {
+                std::string l = nfsnl::baseName(g_all[i].path);
+                for (char& c : l) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+                if (l == leaf) idx = (int)i;
+            }
+            if (idx < 0) { MessageBoxW(hwnd, widen(leaf + " is not among the files opened.").c_str(), L"Car creator", MB_ICONWARNING); return 0; }
+            newCarFromModel(hwnd, idx, model);
+            return 0;
+        }
+        case IDC_CC_TEXB: {
+            std::string dir;
+            if (pickFolder(hwnd, L"The folder with your textures (PNG / JPG named like the car's: misc.png, "
+                                 L"int.png, wheel.png, ext.png ...)", dir))
+                SetWindowTextW(g_ccTex, widen(dir).c_str());
+            return 0;
+        }
+        case IDC_CC_MAKE: {
+            std::vector<nfsnl::Rr3CarOutput> outs;
+            std::string report;
+            if (!ccRun(hwnd, outs, report)) { if (!report.empty()) ccReport(report); return 0; }
+            std::string list;
+            if (g_ccAdding) {
+                // a new car: its files go where you say, laid out like the game's folder
+                std::string dir;
+                if (!pickFolder(hwnd, L"Where to save the new car's files (laid out like the game's folder - copy them over it)", dir)) {
+                    ccReport(report);
+                    return 0;
+                }
+                int n = 0;
+                ccWriteToFolder(outs, dir, list, n);
+                report += "\n" + std::to_string(n) + " file(s) saved under " + dir + ":\n" + list;
+                ccReport(report);
+                ccShowWritten(hwnd, "Car saved", std::to_string(n) + " file(s) saved under " + dir +
+                              " - copy them over the game's folder (REPLACED: the game has this file already; NEW: it is added).", list);
+                logLine("car creator: new car, %d file(s) under %s", n, dir.c_str());
+                ccOfferPointsEditor(hwnd, outs);
+                return 0;
+            }
+            // a car of the game: straight into the game's files, each original kept once as .bak
+            int replaced = 0, added = 0;
+            ccWriteIntoGame(outs, list, replaced, added);
+            report += "\n" + std::to_string(replaced) + " file(s) replaced, " + std::to_string(added) + " added:\n" + list +
+                      "Each replaced file's original is kept beside it as .bak. Reopen the game folder to see the new files in the tree.";
+            ccReport(report);
+            ccShowWritten(hwnd, "Car saved", std::to_string(replaced) + " file(s) replaced and " + std::to_string(added) +
+                          " added in the game's folder (the originals kept as .bak):", list);
+            logLine("car creator: %d replaced, %d added", replaced, added);
+            ccOfferPointsEditor(hwnd, outs);
+            return 0;
+        }
+        case IDC_CC_FOLDER: {
+            std::vector<nfsnl::Rr3CarOutput> outs;
+            std::string report;
+            if (!ccRun(hwnd, outs, report)) { if (!report.empty()) ccReport(report); return 0; }
+            ccWriteFolder(hwnd, outs, report);
+            return 0;
+        }
+        case IDC_CC_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_ccWnd = nullptr;
+        g_ccTheme = ToolTheme();
+        for (auto& p : g_ccPage) p.clear();
+        g_ccSimple.clear();
+        g_ccAdvanced.clear();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void openCarCreator(HWND hwnd) {
+    if (!g_profile || g_profile->id != "real_racing_3") {
+        MessageBoxW(hwnd, L"The car creator works on Real Racing 3 - open Real Racing 3 first.", L"Car creator",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    if (g_ccWnd) { SetForegroundWindow(g_ccWnd); return; }
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    g_ccInfos = nfsnl::rr3ListCars(ccAssetPaths(), ccRead);
+    SetCursor(old);
+    // the cars that have models among the files opened: vehicles/<car>/<car>_a.m3g
+    std::set<std::string> withModels;
+    for (const Entry& e : g_all) {
+        std::string l = nfsnl::baseName(e.path);
+        for (char& c : l) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (l.size() < 7 || l.compare(l.size() - 6, 6, "_a.m3g") != 0 || l.find("_int_a.m3g") != std::string::npos) continue;
+        std::string car = l.substr(0, l.size() - 6);
+        if (e.path.find(car + "/") == std::string::npos && e.path.find(car + "\\") == std::string::npos) continue;
+        withModels.insert(car);
+    }
+    if (withModels.empty()) {
+        MessageBoxW(hwnd, L"No Real Racing 3 cars (vehicles/<car>/<car>_a.m3g) in the files opened.", L"Car creator",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    // the list as people know the cars: year, make, model
+    std::vector<std::pair<std::string, std::string>> shown;     // label, folder
+    for (const std::string& f : withModels) {
+        const nfsnl::Rr3CarInfo* in = ccInfo(f);
+        shown.push_back({ in && in->readable ? in->make + " " + in->model + " (" + in->year + ")" : f, f });
+    }
+    std::sort(shown.begin(), shown.end());
+    g_ccCars.clear();
+    for (const auto& s : shown) g_ccCars.push_back(s.second);
+    g_ccBrands.clear();
+    g_ccUpgrades.clear();
+    {
+        std::map<std::string, std::string> brands;
+        std::set<std::string> upg;
+        for (const nfsnl::Rr3CarInfo& c : g_ccInfos) {
+            if (!c.makeKey.empty() && !brands.count(c.makeKey)) brands[c.makeKey] = c.make;
+            if (!c.profile.empty() && c.profile.find(':') == std::string::npos) upg.insert(c.profile);
+        }
+        for (const auto& kv : brands) g_ccBrands.push_back(kv);
+        std::sort(g_ccBrands.begin(), g_ccBrands.end(), [](const std::pair<std::string, std::string>& a,
+                                                           const std::pair<std::string, std::string>& b) {
+            return a.second < b.second;
+        });
+        g_ccUpgrades.assign(upg.begin(), upg.end());
+    }
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = CarCreatorProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"MonkeyToolCarCreator";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    const int W = 820, H = 720;
+    g_ccWnd = CreateWindowExW(0, L"MonkeyToolCarCreator", L"Car creator - Real Racing 3",
+                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                              CW_USEDEFAULT, CW_USEDEFAULT, W, H, hwnd, nullptr, g_inst, nullptr);
+    if (!g_ccWnd) return;
+    g_ccTheme = ToolTheme();
+    for (auto& p : g_ccPage) p.clear();
+    g_ccSimple.clear();
+    g_ccAdvanced.clear();
+    g_ccLivs.clear();
+    g_ccLivPicPath.clear();
+    g_ccShowAll = false;
+    RECT rc;
+    GetClientRect(g_ccWnd, &rc);
+    int cw = rc.right;
+    std::vector<HWND>* page = nullptr;            // where new controls go: a step, or every step
+    auto keep = [&](HWND h, char kind) {
+        SendMessageW(h, WM_SETFONT, (WPARAM)g_headerFont, TRUE);
+        g_ccTheme.ctl.push_back({ h, kind });
+        if (page) page->push_back(h);
+        return h;
+    };
+    auto label = [&](const wchar_t* t, int x, int y, int w, int h = 20) {
+        return keep(CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE, x, y, w, h, g_ccWnd, nullptr, g_inst, nullptr), 's');
+    };
+    auto button = [&](const wchar_t* t, int id, int x, int y, int w, int h = 30) {
+        return keep(CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, x, y, w, h, g_ccWnd,
+                                    (HMENU)(INT_PTR)id, g_inst, nullptr), 'b');
+    };
+    auto choice = [&](const wchar_t* t, int id, int x, int y, int w, DWORD style) {
+        return keep(CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | style, x, y, w, 24, g_ccWnd,
+                                    (HMENU)(INT_PTR)id, g_inst, nullptr), 'r');
+    };
+    auto edit = [&](int id, int x, int y, int w, DWORD extra = 0) {
+        return keep(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | extra,
+                                    x, y, w, 26, g_ccWnd, (HMENU)(INT_PTR)id, g_inst, nullptr), 'e');
+    };
+    auto combo = [&](int id, int x, int y, int w) {
+        return keep(CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                    x, y, w, 420, g_ccWnd, (HMENU)(INT_PTR)id, g_inst, nullptr), 'c');
+    };
+    // ---- every step: what to do, and the steps
+    int y = 12;
+    g_ccAdd = choice(L"Add a new car", IDC_CC_ADD, 16, y, 220, BS_AUTORADIOBUTTON);
+    g_ccOver = choice(L"Change a car of the game", IDC_CC_OVER, 250, y, 300, BS_AUTORADIOBUTTON);
+    y += 36;
+    static const wchar_t* stepNames[4] = { L"1  Car", L"2  Performance", L"3  Look", L"4  Liveries & sound" };
+    int sw = (cw - 32 - 3 * 8) / 4;
+    for (int k = 0; k < 4; ++k) g_ccStepBtn[k] = button(stepNames[k], IDC_CC_STEP0 + k, 16 + k * (sw + 8), y, sw, 32);
+    y += 44;
+    g_ccStepTitle = label(L"", 16, y, cw - 32, 22);
+    y += 30;
+    const int top = y, lx = 16, fx = 230, fw = cw - fx - 16;
+
+    // ---- step 1: the car
+    page = &g_ccPage[0];
+    y = top;
+    label(L"Start from this car:", lx, y + 4, 200);
+    g_ccCar = combo(IDC_CC_CAR, fx, y, fw);
+    for (const auto& s : shown) SendMessageW(g_ccCar, CB_ADDSTRING, 0, (LPARAM)widen(s.first).c_str());
+    y += 32;
+    label(L"Its shape, physics, sound and liveries are copied; you change the rest.", fx, y, fw);
+    y += 40;
+    label(L"Name in the game:", lx, y + 4, 200);
+    g_ccName = edit(IDC_CC_NAME, fx, y, fw);
+    y += 36;
+    label(L"Year:", lx, y + 4, 200);
+    g_ccYear = edit(IDC_CC_YEAR, fx, y, 90, ES_NUMBER);
+    y += 36;
+    label(L"Brand:", lx, y + 4, 200);
+    g_ccBrand = combo(IDC_CC_BRAND, fx, y, fw);
+    for (const auto& b : g_ccBrands) SendMessageW(g_ccBrand, CB_ADDSTRING, 0, (LPARAM)widen(b.second).c_str());
+    y += 40;
+    g_ccFolderLbl = label(L"", fx, y, fw);
+
+    // ---- step 2: performance
+    page = &g_ccPage[1];
+    y = top;
+    int half = (cw - 48) / 2, ex = 16 + half + 16;
+    std::vector<HWND>* simple = &g_ccSimple;
+    auto simpleKeep = [&](HWND h) { simple->push_back(h); return h; };
+    simpleKeep(label(L"Class:", lx, y + 4, 120));
+    g_ccClass = simpleKeep(combo(0, lx + 130, y, half - 130));
+    for (const char* c : kCcClasses) SendMessageW(g_ccClass, CB_ADDSTRING, 0, (LPARAM)widen(c).c_str());
+    simpleKeep(label(L"Drivetrain:", ex, y + 4, 120));
+    g_ccDrive = simpleKeep(combo(0, ex + 130, y, half - 130));
+    for (const char* d : kCcDrives) SendMessageW(g_ccDrive, CB_ADDSTRING, 0, (LPARAM)widen(d).c_str());
+    y += 40;
+    simpleKeep(label(L"Aspiration:", lx, y + 4, 120));
+    g_ccAsp = simpleKeep(combo(0, lx + 130, y, half - 130));
+    for (const wchar_t* a : kCcAspShown) SendMessageW(g_ccAsp, CB_ADDSTRING, 0, (LPARAM)a);
+    y += 40;
+    for (size_t k = 0; k < sizeof(g_ccFig) / sizeof(g_ccFig[0]); ++k) {
+        int x = (k % 2) ? ex : lx;
+        simpleKeep(label(g_ccFig[k].label, x, y + 4, 200));
+        g_ccFig[k].edit = simpleKeep(edit(0, x + 210, y, half - 210));
+        if (k % 2) y += 36;
+    }
+    y += 6;
+    simpleKeep(label(L"Upgrades:", lx, y + 4, 120));
+    g_ccUpg = simpleKeep(combo(0, lx + 130, y, cw - lx - 130 - 16));
+    SendMessageW(g_ccUpg, CB_ADDSTRING, 0, (LPARAM)L"the starting car's own");
+    for (const std::string& u : g_ccUpgrades) SendMessageW(g_ccUpg, CB_ADDSTRING, 0, (LPARAM)widen("like " + u).c_str());
+    // the full list, behind "All figures"
+    y = top;
+    simple = &g_ccAdvanced;
+    g_ccList = simpleKeep(keep(CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                               WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                               lx, y, cw - 32, 300, g_ccWnd, (HMENU)IDC_CC_LIST, g_inst, nullptr), 'l'));
+    SendMessageW(g_ccList, kLvmSetExStyle, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    lvInsertColumn(g_ccList, 0, 380, L"Figure");
+    lvInsertColumn(g_ccList, 1, 200, L"Value");
+    lvInsertColumn(g_ccList, 2, 180, L"Before");
+    y += 310;
+    g_ccLabel = simpleKeep(label(L"Value:", lx, y + 4, 300));
+    g_ccValue = simpleKeep(edit(IDC_CC_VALUE, lx + 310, y, cw - lx - 310 - 230));
+    simpleKeep(button(L"Set", IDC_CC_SET, cw - 222, y - 2, 100));
+    simpleKeep(button(L"Undo all", IDC_CC_UNDO, cw - 114, y - 2, 98));
+    g_ccAllBtn = button(L"All figures...", IDC_CC_ALL, cw - 16 - 220, top + 356, 220);
+
+    // ---- step 3: models and textures
+    page = &g_ccPage[2];
+    y = top;
+    label(L"Body (OBJ / FBX):", lx, y + 4, 200);
+    g_ccModel = edit(0, fx, y, fw - 44);
+    button(L"...", IDC_CC_MODELB, cw - 16 - 38, y - 2, 38);
+    y += 36;
+    button(L"Preview in 3D", IDC_CC_PREVIEW, fx, y, 180);
+    label(L"(shows it on the starting car's frame in the main window)", fx + 190, y + 6, fw - 190);
+    y += 44;
+    label(L"Cockpit (optional):", lx, y + 4, 200);
+    g_ccInt = edit(0, fx, y, fw - 44);
+    button(L"...", IDC_CC_INTB, cw - 16 - 38, y - 2, 38);
+    y += 44;
+    label(L"Textures folder (optional):", lx, y + 4, 210);
+    g_ccTex = edit(0, fx, y, fw - 44);
+    button(L"...", IDC_CC_TEXB, cw - 16 - 38, y - 2, 38);
+    y += 32;
+    label(L"Pictures named like the car's textures: misc.png, int.png, badges.png, wheel.png, lights.png.",
+          fx, y, fw, 40);
+    y += 50;
+    g_ccLods = choice(L"Build the far-away detail levels from the model too", 0, fx, y, fw, BS_AUTOCHECKBOX);
+    SendMessageW(g_ccLods, BM_SETCHECK, BST_CHECKED, 0);
+
+    // ---- step 4: liveries and sound
+    page = &g_ccPage[3];
+    y = top;
+    g_ccLivNote = label(L"", lx, y, cw - 32);
+    y += 24;
+    g_ccLivList = keep(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
+                                       lx, y, cw - 32 - 170, 112, g_ccWnd, nullptr, g_inst, nullptr), 'x');
+    button(L"Remove new one", IDC_CC_LIVDEL, cw - 16 - 160, y, 160);
+    y += 122;
+    label(L"Add a livery - its name:", lx, y + 4, 200);
+    g_ccLivName = edit(IDC_CC_LIVNAME, fx, y, fw - 170);
+    button(L"Add livery", IDC_CC_LIVADD, cw - 16 - 160, y - 2, 160);
+    y += 30;
+    g_ccLivTexLbl = label(L"", fx, y, fw);
+    y += 26;
+    label(L"Body colour:", lx, y + 6, 200);
+    g_ccLivColour = button(L"Colour...", IDC_CC_LIVCOLOUR, fx, y, 200);
+    g_ccLivPic = button(L"Own texture (optional)...", IDC_CC_LIVPIC, fx + 210, y, fw - 210);
+    y += 36;
+    label(L"The tool paints the car's body texture in the colour - or uses your own texture if you choose one. "
+          L"The colour is also the livery's button in the game.", lx, y, cw - 32, 40);
+    y += 50;
+    label(L"Engine sound from:", lx, y + 4, 200);
+    g_ccSound = combo(IDC_CC_SOUND, fx, y, fw);
+    SendMessageW(g_ccSound, CB_ADDSTRING, 0, (LPARAM)L"the starting car (its own)");
+    for (const auto& s2 : shown) SendMessageW(g_ccSound, CB_ADDSTRING, 0, (LPARAM)widen(s2.first).c_str());
+    SendMessageW(g_ccSound, CB_SETCURSEL, 0, 0);
+    y += 38;
+    g_ccKeep = choice(L"Keep the game's own checksums in the asset list (so it does not download them again)", 0, lx, y,
+                      cw - 32, BS_AUTOCHECKBOX);
+    SendMessageW(g_ccKeep, BM_SETCHECK, BST_CHECKED, 0);
+
+    // ---- every step: the report and the buttons
+    page = nullptr;
+    int by = rc.bottom - 48;
+    g_ccReport = keep(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                                      16, by - 118, cw - 32, 108, g_ccWnd, nullptr, g_inst, nullptr), 'e');
+    g_ccBack = button(L"< Back", IDC_CC_BACK, 16, by, 110, 34);
+    g_ccNext = button(L"Next >", IDC_CC_NEXT, 134, by, 110, 34);
+    g_ccFinish = button(L"Create the car...", IDC_CC_MAKE, cw - 16 - 100 - 8 - 220, by, 220, 34);
+    g_ccFolderBtn = button(L"Write to a folder...", IDC_CC_FOLDER, cw - 16 - 100 - 8 - 220 - 8 - 190, by, 190, 34);
+    button(L"Close", IDC_CC_CLOSE, cw - 16 - 100, by, 100, 34);
+    ttApply(g_ccWnd, g_ccTheme);
+    ccShowLivColour();
+    SendMessageW(g_ccCar, CB_SETCURSEL, 0, 0);
+    ccSetMode(true);
+    ccLoadCar();
+    ccShowStep(0);
+    ShowWindow(g_ccWnd, SW_SHOW);
+}
+
+// ---- racing series (Real Racing 3): the career's series - their names,
+// allowed cars and events - edited, or new ones added in a group of the
+// career menu, a new group with its own card picture if wanted ----
+static HWND g_rsWnd = nullptr, g_rsList = nullptr, g_rsFilter = nullptr, g_rsTitle = nullptr, g_rsDesc = nullptr,
+            g_rsCars = nullptr, g_rsEvents = nullptr, g_rsTrack = nullptr, g_rsType = nullptr, g_rsLaps = nullptr,
+            g_rsTier = nullptr, g_rsGroup = nullptr, g_rsInGroup = nullptr, g_rsNewGroupR = nullptr,
+            g_rsNewGroup = nullptr, g_rsCard = nullptr, g_rsReward = nullptr, g_rsReport = nullptr, g_rsMode = nullptr;
+static nfsnl::Rr3Career g_rsCareer;
+static ToolTheme g_rsTheme, g_tkTheme;
+static nfsnl::Rr3Texts g_rsTexts;
+static std::vector<int> g_rsShown;                      // list row -> series index
+static std::vector<nfsnl::Rr3CarInfo> g_rsCarInfos;
+static std::vector<std::string> g_rsTracks;
+static std::vector<nfsnl::Rr3CareerGroup> g_rsGroups;
+static std::vector<nfsnl::Rr3SeriesEvent> g_rsEv;
+static int g_rsSel = -1;                                // series index being edited, -1 none
+static bool g_rsNew = false, g_rsEvChanged = false, g_rsCarsChanged = false;
+static std::string g_rsCardPath;
+static const int kRsTypes[] = { 2, 1, 0, 4, 7, 10, 11, 13 };
+static const wchar_t* kRsTypeNames[] = { L"Cup", L"Head to head", L"Elimination", L"Endurance", L"Speed record",
+                                         L"Speed snap", L"Drag race", L"Time trial" };
+enum { IDC_RS_LIST = 5101, IDC_RS_FILTER, IDC_RS_EDIT, IDC_RS_NEW, IDC_RS_EVADD, IDC_RS_EVDEL, IDC_RS_CARDB,
+       IDC_RS_WRITE, IDC_RS_CLOSE, IDC_RS_CARS, IDC_RS_INGROUP, IDC_RS_NEWGROUP, IDC_RS_PENDING, IDC_RS_TRACK };
+static void openTrackAdder(HWND hwnd);
+
+static void rsReport(const std::string& s) {
+    std::string crlf;
+    for (char c : s) { if (c == '\n') crlf += '\r'; if (c != '\r') crlf += c; }
+    SetWindowTextW(g_rsReport, widen(crlf).c_str());
+}
+
+static std::string rsTitleOf(const nfsnl::Rr3Series& s) {
+    std::string t = g_rsTexts.get(s.titleKey());
+    return t.empty() ? s.titleKey() : t;
+}
+
+static void rsFillList() {
+    SendMessageW(g_rsList, kLvmDeleteAll, 0, 0);
+    g_rsShown.clear();
+    std::string f = ccText(g_rsFilter);
+    for (char& c : f) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    std::map<int32_t, std::pair<int, int>> counts;
+    for (const nfsnl::Rr3Tier& t : g_rsCareer.tiers) { counts[t.seriesId()].first++; counts[t.seriesId()].second += (int)t.events.size(); }
+    for (size_t k = 0; k < g_rsCareer.series.size(); ++k) {
+        const nfsnl::Rr3Series& s = g_rsCareer.series[k];
+        std::string title = rsTitleOf(s), group = nfsnl::rr3CareerGroupOf(g_rsCareer, s.id());
+        std::string hay = title + " " + group + " " + std::to_string(s.id());
+        for (char& c : hay) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (!f.empty() && hay.find(f) == std::string::npos) continue;
+        int row = (int)g_rsShown.size();
+        g_rsShown.push_back((int)k);
+        std::wstring idw = std::to_wstring(s.id());
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        it.iItem = row;
+        it.pszText = &idw[0];
+        SendMessageW(g_rsList, kLvmInsertItemW, 0, (LPARAM)&it);
+        lvSetText(g_rsList, row, 1, widen(title));
+        lvSetText(g_rsList, row, 2, widen(group.empty() ? std::string("(not in the menu)") : group));
+        lvSetText(g_rsList, row, 3, std::to_wstring(counts[s.id()].first));
+        lvSetText(g_rsList, row, 4, std::to_wstring(counts[s.id()].second));
+    }
+}
+
+static void rsFillEvents() {
+    SendMessageW(g_rsEvents, kLvmDeleteAll, 0, 0);
+    for (size_t k = 0; k < g_rsEv.size(); ++k) {
+        const nfsnl::Rr3SeriesEvent& e = g_rsEv[k];
+        std::wstring tier = std::to_wstring(e.tier + 1);
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        it.iItem = (int)k;
+        it.pszText = &tier[0];
+        SendMessageW(g_rsEvents, kLvmInsertItemW, 0, (LPARAM)&it);
+        std::wstring type = std::to_wstring(e.type);
+        for (size_t q = 0; q < sizeof(kRsTypes) / sizeof(kRsTypes[0]); ++q) if (kRsTypes[q] == e.type) type = kRsTypeNames[q];
+        lvSetText(g_rsEvents, (int)k, 1, type);
+        lvSetText(g_rsEvents, (int)k, 2, widen(e.track));
+        lvSetText(g_rsEvents, (int)k, 3, std::to_wstring(e.laps));
+    }
+}
+
+// the chosen series into the editor: as itself, or as the start of a new one
+static void rsLoad(bool asNew) {
+    int row = lvSelected(g_rsList);
+    if (row < 0 || (size_t)row >= g_rsShown.size()) {
+        MessageBoxW(g_rsWnd, asNew ? L"Pick the series to start from (its layout, rewards and AI are copied)."
+                                   : L"Pick the series to edit.", L"Racing series", MB_ICONINFORMATION);
+        return;
+    }
+    g_rsSel = g_rsShown[row];
+    g_rsNew = asNew;
+    g_rsEvChanged = asNew;
+    g_rsCarsChanged = asNew;
+    const nfsnl::Rr3Series& s = g_rsCareer.series[g_rsSel];
+    SetWindowTextW(g_rsTitle, asNew ? L"" : widen(rsTitleOf(s)).c_str());
+    std::string d = g_rsTexts.get(s.descKey());
+    SetWindowTextW(g_rsDesc, asNew ? L"" : widen(d).c_str());
+    SetWindowTextW(g_rsReward, asNew ? L"" : widen(s.completionReward()).c_str());
+    g_rsEv.clear();
+    std::set<int32_t> cars;
+    std::vector<const nfsnl::Rr3Tier*> tiers;
+    for (const nfsnl::Rr3Tier& t : g_rsCareer.tiers) if (t.seriesId() == s.id()) tiers.push_back(&t);
+    std::sort(tiers.begin(), tiers.end(), [](const nfsnl::Rr3Tier* a, const nfsnl::Rr3Tier* b) { return a->indexInSeries() < b->indexInSeries(); });
+    for (const nfsnl::Rr3Tier* t : tiers) {
+        for (const auto& c : t->cars) cars.insert(c.first);
+        for (const nfsnl::Rr3Event& e : t->events) {
+            nfsnl::Rr3SeriesEvent E;
+            E.track = e.track();
+            E.type = e.type();
+            E.laps = e.laps();
+            E.tier = t->indexInSeries();
+            g_rsEv.push_back(E);
+        }
+    }
+    int n = (int)SendMessageW(g_rsCars, LB_GETCOUNT, 0, 0);
+    for (int k = 0; k < n && (size_t)k < g_rsCarInfos.size(); ++k)
+        SendMessageW(g_rsCars, LB_SETSEL, cars.count((int32_t)g_rsCarInfos[k].id) ? TRUE : FALSE, k);
+    rsFillEvents();
+    std::string grp = nfsnl::rr3CareerGroupOf(g_rsCareer, s.id());
+    for (size_t k = 0; k < g_rsGroups.size(); ++k)
+        if (g_rsGroups[k].path == grp) SendMessageW(g_rsGroup, CB_SETCURSEL, (WPARAM)k, 0);
+    SendMessageW(g_rsInGroup, BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(g_rsNewGroupR, BM_SETCHECK, 0, 0);
+    char b[300];
+    snprintf(b, sizeof(b), asNew ? "New series, laid out like %d \"%s\" - give it a title, its cars and events."
+                                 : "Editing series %d \"%s\".", s.id(), rsTitleOf(s).c_str());
+    SetWindowTextW(g_rsMode, widen(b).c_str());
+}
+
+static bool rsBuild(std::vector<nfsnl::Rr3CarOutput>& outs, std::string& report) {
+    if (g_rsSel < 0) {
+        MessageBoxW(g_rsWnd, L"Pick a series and press Edit, or New series, first.", L"Racing series", MB_ICONINFORMATION);
+        return false;
+    }
+    nfsnl::Rr3SeriesJob job;
+    const nfsnl::Rr3Series& s = g_rsCareer.series[g_rsSel];
+    if (g_rsNew) job.templateId = s.id(); else job.seriesId = s.id();
+    job.title = ccText(g_rsTitle);
+    job.description = ccText(g_rsDesc);
+    if (!g_rsNew && job.title == rsTitleOf(s)) job.title.clear();
+    if (!g_rsNew && job.description == g_rsTexts.get(s.descKey())) job.description.clear();
+    if (g_rsNew && job.title.empty()) { MessageBoxW(g_rsWnd, L"Give the new series a title.", L"Racing series", MB_ICONINFORMATION); return false; }
+    job.completionReward = ccText(g_rsReward);
+    if (g_rsCarsChanged) {
+        int n = (int)SendMessageW(g_rsCars, LB_GETCOUNT, 0, 0);
+        for (int k = 0; k < n && (size_t)k < g_rsCarInfos.size(); ++k)
+            if (SendMessageW(g_rsCars, LB_GETSEL, k, 0) > 0) job.cars.push_back((int32_t)g_rsCarInfos[k].id);
+        if (job.cars.empty()) { MessageBoxW(g_rsWnd, L"Select at least one car the series allows.", L"Racing series", MB_ICONINFORMATION); return false; }
+    }
+    if (g_rsEvChanged) {
+        job.events = g_rsEv;
+        if (job.events.empty()) { MessageBoxW(g_rsWnd, L"The series needs at least one event.", L"Racing series", MB_ICONINFORMATION); return false; }
+        // tiers numbered without gaps
+        std::set<int> used;
+        for (const auto& e : job.events) used.insert(e.tier);
+        std::map<int, int> renum;
+        int k = 0;
+        for (int t : used) renum[t] = k++;
+        for (auto& e : job.events) e.tier = renum[e.tier];
+    }
+    if (SendMessageW(g_rsNewGroupR, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        job.newGroupTitle = ccText(g_rsNewGroup);
+        if (job.newGroupTitle.empty()) { MessageBoxW(g_rsWnd, L"Name the new group.", L"Racing series", MB_ICONINFORMATION); return false; }
+        job.cardPicture = g_rsCardPath;
+    } else {
+        int gsel = (int)SendMessageW(g_rsGroup, CB_GETCURSEL, 0, 0);
+        if (gsel >= 0 && (size_t)gsel < g_rsGroups.size()) {
+            std::string now = nfsnl::rr3CareerGroupOf(g_rsCareer, s.id());
+            if (g_rsNew || g_rsGroups[gsel].path != now) job.group = g_rsGroups[gsel].key;
+        }
+    }
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    bool ok = nfsnl::rr3SeriesBuild(job, ccAssetPaths(), ccRead, outs, report);
+    SetCursor(old);
+    return ok;
+}
+
+static LRESULT CALLBACK RacingSeriesProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    LRESULT themed;
+    if (ttMessage(g_rsTheme, hwnd, msg, wp, lp, themed)) return themed;
+    switch (msg) {
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDC_RS_FILTER:
+            if (HIWORD(wp) == EN_CHANGE) rsFillList();
+            return 0;
+        case IDC_RS_EDIT: rsLoad(false); return 0;
+        case IDC_RS_NEW: rsLoad(true); return 0;
+        case IDC_RS_CARS:
+            if (HIWORD(wp) == LBN_SELCHANGE) g_rsCarsChanged = true;
+            return 0;
+        case IDC_RS_EVADD: {
+            nfsnl::Rr3SeriesEvent e;
+            int t = (int)SendMessageW(g_rsTrack, CB_GETCURSEL, 0, 0);
+            if (t < 0 || (size_t)t >= g_rsTracks.size()) { MessageBoxW(hwnd, L"Choose the track.", L"Racing series", MB_ICONINFORMATION); return 0; }
+            e.track = g_rsTracks[t];
+            int ty = (int)SendMessageW(g_rsType, CB_GETCURSEL, 0, 0);
+            e.type = kRsTypes[ty < 0 ? 0 : ty];
+            e.laps = atoi(ccText(g_rsLaps).c_str());
+            if (e.laps < 1) e.laps = 1;
+            if (e.laps > 20) e.laps = 20;
+            e.tier = atoi(ccText(g_rsTier).c_str()) - 1;
+            if (e.tier < 0) e.tier = 0;
+            g_rsEv.push_back(e);
+            std::stable_sort(g_rsEv.begin(), g_rsEv.end(), [](const nfsnl::Rr3SeriesEvent& a, const nfsnl::Rr3SeriesEvent& b) { return a.tier < b.tier; });
+            g_rsEvChanged = true;
+            rsFillEvents();
+            return 0;
+        }
+        case IDC_RS_EVDEL: {
+            int r = lvSelected(g_rsEvents);
+            if (r >= 0 && (size_t)r < g_rsEv.size()) { g_rsEv.erase(g_rsEv.begin() + r); g_rsEvChanged = true; rsFillEvents(); }
+            return 0;
+        }
+        case IDC_RS_INGROUP:
+        case IDC_RS_NEWGROUP:
+            SendMessageW(g_rsInGroup, BM_SETCHECK, LOWORD(wp) == IDC_RS_INGROUP ? BST_CHECKED : 0, 0);
+            SendMessageW(g_rsNewGroupR, BM_SETCHECK, LOWORD(wp) == IDC_RS_NEWGROUP ? BST_CHECKED : 0, 0);
+            return 0;
+        case IDC_RS_CARDB: {
+            wchar_t file[MAX_PATH] = L"";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"Pictures (*.png;*.jpg;*.jpeg;*.bmp;*.tga)\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All files\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrTitle = L"The new group's card (portrait, about 340 x 471)";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+            if (GetOpenFileNameW(&ofn)) {
+                g_rsCardPath = narrow(std::wstring(file));
+                SetWindowTextW(g_rsCard, widen(nfsnl::baseName(g_rsCardPath)).c_str());
+                SendMessageW(g_rsNewGroupR, BM_SETCHECK, BST_CHECKED, 0);
+                SendMessageW(g_rsInGroup, BM_SETCHECK, 0, 0);
+            }
+            return 0;
+        }
+        case IDC_RS_PENDING:
+        case IDC_RS_WRITE: {
+            std::vector<nfsnl::Rr3CarOutput> outs;
+            std::string report;
+            if (!rsBuild(outs, report)) { if (!report.empty()) rsReport(report); return 0; }
+            if (LOWORD(wp) == IDC_RS_PENDING) {
+                // into the files opened, where they exist; new ones need a folder
+                int added = 0, missing = 0;
+                for (const nfsnl::Rr3CarOutput& o : outs) {
+                    int i = -1;
+                    for (size_t k = 0; k < g_all.size() && i < 0; ++k) {
+                        std::string p = g_all[k].path;
+                        for (char& c : p) if (c == '\\') c = '/';
+                        if (p.size() >= o.path.size() && p.compare(p.size() - o.path.size(), o.path.size(), o.path) == 0 &&
+                            (p.size() == o.path.size() || p[p.size() - o.path.size() - 1] == '/')) i = (int)k;
+                    }
+                    if (i < 0) { ++missing; report += "Not among the files opened (use Write to a folder): " + o.path + "\n"; continue; }
+                    addPending(g_all[i], o.data, "racing series - " + o.note);
+                    ++added;
+                }
+                report += "\n" + std::to_string(added) + " file(s) ready - click Save (the blue disk, Ctrl+S) in the main window.";
+                if (missing) report += "\nThe new files are not written this way - press \"Write the files to a folder\".";
+                rsReport(report);
+                return 0;
+            }
+            std::string dir;
+            if (!pickFolder(hwnd, L"Write the files here, laid out as in the game's depot folder (copy them over it)", dir)) { rsReport(report); return 0; }
+            int n = 0;
+            for (const nfsnl::Rr3CarOutput& o : outs) {
+                std::string target = dir + "\\" + o.path;
+                for (char& c : target) if (c == '/') c = '\\';
+                nfsnl::makeDirsFor(target);
+                if (nfsnl::writeFile(target, o.data)) ++n; else report += "Could not write " + target + "\n";
+            }
+            report += "\n" + std::to_string(n) + " file(s) written under " + dir + " - copy them over the game's depot folder.";
+            rsReport(report);
+            logLine("racing series: %d file(s) written to %s", n, dir.c_str());
+            return 0;
+        }
+        case IDC_RS_TRACK:
+            openTrackAdder(GetParent(hwnd) ? GetParent(hwnd) : hwnd);
+            return 0;
+        case IDC_RS_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_rsWnd = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ---- a new track (Real Racing 3): a variant of one of the game's with its
+// own id, name and place in the career's track list, and optionally its own
+// copy of the donor's folder for your models and textures ----
+static HWND g_tkWnd = nullptr, g_tkDonor = nullptr, g_tkName = nullptr, g_tkLoc = nullptr, g_tkCountry = nullptr,
+            g_tkTime = nullptr, g_tkFolder = nullptr, g_tkModel = nullptr, g_tkReport = nullptr;
+static std::vector<nfsnl::Rr3TrackInfo> g_tkTracks;
+enum { IDC_TK_MODELB = 5201, IDC_TK_WRITE, IDC_TK_CLOSE };
+
+static LRESULT CALLBACK TrackAdderProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    LRESULT themed;
+    if (ttMessage(g_tkTheme, hwnd, msg, wp, lp, themed)) return themed;
+    switch (msg) {
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDC_TK_MODELB: {
+            wchar_t file[MAX_PATH] = L"";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"3D model (*.obj;*.fbx)\0*.obj;*.fbx\0All files\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrTitle = L"Your track model - objects named like the track's meshes (export the track from here first)";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+            if (GetOpenFileNameW(&ofn)) SetWindowTextW(g_tkModel, file);
+            return 0;
+        }
+        case IDC_TK_WRITE: {
+            nfsnl::Rr3NewTrackJob job;
+            int d = (int)SendMessageW(g_tkDonor, CB_GETCURSEL, 0, 0);
+            if (d < 0 || (size_t)d >= g_tkTracks.size()) { MessageBoxW(hwnd, L"Choose the track to start from.", L"New track", MB_ICONINFORMATION); return 0; }
+            job.donor = g_tkTracks[d].name;
+            job.name = ccText(g_tkName);
+            job.location = ccText(g_tkLoc);
+            job.country = ccText(g_tkCountry);
+            job.timeLabel = ccText(g_tkTime);
+            job.newFolder = ccText(g_tkFolder);
+            job.modelPath = ccText(g_tkModel);
+            if (job.name.empty()) { MessageBoxW(hwnd, L"Give the track its name (it must differ from every track's).", L"New track", MB_ICONINFORMATION); return 0; }
+            if (!job.modelPath.empty() && job.newFolder.empty()) {
+                MessageBoxW(hwnd, L"A model needs a folder of the track's own - type one in \"Own folder\" (e.g. Laguna_Seca_Custom), "
+                                  L"so the game's track keeps its models.", L"New track", MB_ICONINFORMATION);
+                return 0;
+            }
+            std::vector<nfsnl::Rr3CarOutput> outs;
+            std::string report;
+            HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+            bool ok = nfsnl::rr3AddTrack(job, ccAssetPaths(), ccRead, outs, report);
+            SetCursor(old);
+            std::string crlf;
+            if (ok) {
+                std::string dir;
+                if (pickFolder(hwnd, L"Write the track's files here, laid out as in the game's depot folder (copy them over it)", dir)) {
+                    int n = 0;
+                    for (const nfsnl::Rr3CarOutput& o : outs) {
+                        std::string target = dir + "\\" + o.path;
+                        for (char& c : target) if (c == '/') c = '\\';
+                        nfsnl::makeDirsFor(target);
+                        if (nfsnl::writeFile(target, o.data)) ++n; else report += "Could not write " + target + "\n";
+                    }
+                    report += "\n" + std::to_string(n) + " file(s) written under " + dir + ". Reopen the game folder with them "
+                              "copied in, and the Racing series window lists the track for events.";
+                }
+            }
+            for (char c : report) { if (c == '\n') crlf += '\r'; if (c != '\r') crlf += c; }
+            SetWindowTextW(g_tkReport, widen(crlf).c_str());
+            return 0;
+        }
+        case IDC_TK_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_tkWnd = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ---- the points editor: a car's .points (lights, exhausts, wheels, hinges,
+// the steering wheel ...) on its model. Pick a point - in the list or on the
+// car - and move it; Save writes just the positions moved back into the
+// file, every other byte as it was. ----
+static HWND g_peWnd = nullptr, g_peList = nullptr, g_peX = nullptr, g_peY = nullptr, g_peZ = nullptr,
+            g_peStep = nullptr, g_peTwin = nullptr, g_peInfo = nullptr;
+static ToolTheme g_peTheme;
+static nfsnl::Model g_peRaw, g_peShown, g_peWheels;
+static std::vector<nfsnl::Hardpoint> g_pePts, g_peSaved;
+static Bytes g_peFile;
+static std::string g_peTarget, g_peCar;
+static nfsnl::RenderView g_peView;
+static nfsnl::Image g_peImg;
+static bool g_peImgDirty = true, g_peDrag = false, g_peMoved = false;
+static POINT g_peFrom;
+static int g_peSel = -1;
+static RECT g_peViewRect = { 0, 0, 0, 0 };
+enum { IDC_PE_LIST = 5301, IDC_PE_APPLY, IDC_PE_XM, IDC_PE_XP, IDC_PE_YM, IDC_PE_YP, IDC_PE_ZM, IDC_PE_ZP,
+       IDC_PE_STEP, IDC_PE_TWIN, IDC_PE_SAVE, IDC_PE_REVERT, IDC_PE_CLOSE };
+static const float kPeSteps[] = { 0.001f, 0.005f, 0.01f, 0.05f, 0.1f };
+
+static COLORREF peColour(const std::string& n) {
+    if (n.find("LIGHT") != std::string::npos) return RGB(0xF2, 0xC8, 0x30);       // head / brake lights
+    if (n.find("EXHAUST") != std::string::npos) return RGB(0xF0, 0x7A, 0x20);     // the flames
+    if (n.find("WHEEL") != std::string::npos && n.find("STEER") == std::string::npos) return RGB(0x40, 0x90, 0xF0);
+    if (n.compare(0, 6, "HINGE_") == 0) return RGB(0x40, 0xC0, 0x70);
+    if (n.compare(0, 7, "SPLINE_") == 0) return RGB(0x90, 0x90, 0xA0);
+    return RGB(0xE0, 0xE0, 0xE8);
+}
+// the same place on the car's other side: LEFT <-> RIGHT, _FL <-> _FR ...
+static int peTwin(int i) {
+    std::string n = g_pePts[i].name, t = n;
+    auto swap = [&](const std::string& a, const std::string& b) {
+        size_t at = t.find(a);
+        if (at != std::string::npos) { t.replace(at, a.size(), b); return true; }
+        return false;
+    };
+    if (!swap("LEFT", "RIGHT") && !swap("RIGHT", "LEFT") && !swap("_FL", "_FR") && !swap("_FR", "_FL") &&
+        !swap("_BL", "_BR") && !swap("_BR", "_BL") && !swap("_RL", "_RR") && !swap("_RR", "_RL"))
+        return -1;
+    for (size_t k = 0; k < g_pePts.size(); ++k) if (g_pePts[k].name == t) return (int)k;
+    return -1;
+}
+static void peShowSel() {
+    wchar_t b[32];
+    for (int k = 0; k < 3; ++k) {
+        HWND e = k == 0 ? g_peX : k == 1 ? g_peY : g_peZ;
+        if (g_peSel < 0) { SetWindowTextW(e, L""); continue; }
+        swprintf(b, 32, L"%.4f", g_pePts[g_peSel].pos[k]);
+        SetWindowTextW(e, b);
+    }
+}
+static void peRow(int i) {
+    wchar_t b[32];
+    for (int k = 0; k < 3; ++k) { swprintf(b, 32, L"%.4f", g_pePts[i].pos[k]); lvSetText(g_peList, i, k + 1, b); }
+}
+static void peRefreshModel() {
+    g_peShown = g_peRaw;
+    nfsnl::rr3PlaceParts(g_peShown, g_pePts);
+    if (g_peWheels.valid) nfsnl::rr3AttachWheels(g_peShown, g_peWheels, g_pePts);
+    g_peImgDirty = true;
+    InvalidateRect(g_peWnd, &g_peViewRect, FALSE);
+}
+static bool peChanged() {
+    for (size_t k = 0; k < g_pePts.size(); ++k)
+        for (int c = 0; c < 3; ++c) if (g_pePts[k].pos[c] != g_peSaved[k].pos[c]) return true;
+    return false;
+}
+static void peSelect(int i, bool fromList) {
+    g_peSel = i;
+    if (!fromList && i >= 0) {
+        LVITEMW st{};
+        st.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+        st.state = LVIS_SELECTED | LVIS_FOCUSED;
+        SendMessageW(g_peList, kLvmSetItemState, (WPARAM)i, (LPARAM)&st);
+        SendMessageW(g_peList, 0x1013 /* LVM_ENSUREVISIBLE */, (WPARAM)i, FALSE);
+    }
+    peShowSel();
+    InvalidateRect(g_peWnd, &g_peViewRect, FALSE);
+}
+// move the selected point (and its twin, mirrored, when asked)
+static void peMove(const float pos[3]) {
+    if (g_peSel < 0) return;
+    float before[3] = { g_pePts[g_peSel].pos[0], g_pePts[g_peSel].pos[1], g_pePts[g_peSel].pos[2] };
+    for (int c = 0; c < 3; ++c) g_pePts[g_peSel].pos[c] = pos[c];
+    peRow(g_peSel);
+    if (SendMessageW(g_peTwin, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        int t = peTwin(g_peSel);
+        if (t >= 0) {
+            // the twin moves by the same amount, mirrored across the car's middle
+            g_pePts[t].pos[0] -= pos[0] - before[0];
+            g_pePts[t].pos[1] += pos[1] - before[1];
+            g_pePts[t].pos[2] += pos[2] - before[2];
+            peRow(t);
+        }
+    }
+    peShowSel();
+    peRefreshModel();
+}
+static void peNudge(int axis, float sign) {
+    if (g_peSel < 0) return;
+    int s = (int)SendMessageW(g_peStep, CB_GETCURSEL, 0, 0);
+    float step = kPeSteps[s >= 0 && s < 5 ? s : 2];
+    float p[3] = { g_pePts[g_peSel].pos[0], g_pePts[g_peSel].pos[1], g_pePts[g_peSel].pos[2] };
+    p[axis] += sign * step;
+    peMove(p);
+}
+static bool peSave(HWND hwnd) {
+    Bytes f = g_peFile;
+    int moved = 0;
+    for (size_t k = 0; k < g_pePts.size(); ++k) {
+        bool same = true;
+        for (int c = 0; c < 3; ++c) if (g_pePts[k].pos[c] != g_peSaved[k].pos[c]) same = false;
+        if (same) continue;
+        if (!nfsnl::rr3PointsSetPosition(f, g_pePts[k].name, g_pePts[k].pos)) {
+            MessageBoxW(hwnd, (L"The point " + widen(g_pePts[k].name) + L" could not be written.").c_str(), L"Car points", MB_ICONWARNING);
+            return false;
+        }
+        ++moved;
+    }
+    if (!moved) return true;
+    Bytes old;
+    if (nfsnl::readFile(g_peTarget, old)) {
+        Bytes have;
+        if (!nfsnl::readFile(g_peTarget + ".bak", have)) nfsnl::writeFile(g_peTarget + ".bak", old);
+    }
+    if (!nfsnl::writeFile(g_peTarget, f)) {
+        MessageBoxW(hwnd, (L"Could not write\n" + widen(g_peTarget)).c_str(), L"Car points", MB_ICONERROR);
+        return false;
+    }
+    g_peFile = f;
+    g_peSaved = g_pePts;
+    setStatus("Saved " + std::to_string(moved) + " point(s) to " + g_peTarget);
+    MessageBoxW(hwnd, (std::to_wstring(moved) + L" point(s) saved to\n" + widen(g_peTarget) +
+                       L"\n\nThe file as it was is kept beside it as .bak.").c_str(), L"Car points", MB_ICONINFORMATION);
+    return true;
+}
+static void pePaint(HWND hwnd, HDC dc) {
+    RECT r = g_peViewRect;
+    int w = r.right - r.left, h = r.bottom - r.top;
+    if (w < 8 || h < 8) return;
+    if (g_peImgDirty || g_peImg.width != w || g_peImg.height != h) {
+        g_peView.background[0] = (float)GetRValue(pal().previewBg);
+        g_peView.background[1] = (float)GetGValue(pal().previewBg);
+        g_peView.background[2] = (float)GetBValue(pal().previewBg);
+        nfsnl::renderModel(g_peShown, g_peView, nullptr, w, h, g_peImg);
+        g_peImgDirty = false;
+    }
+    // off screen first: the picture, then the points over it
+    HDC mem = CreateCompatibleDC(dc);
+    HBITMAP bm = CreateCompatibleBitmap(dc, w, h);
+    HGDIOBJ ob = SelectObject(mem, bm);
+    drawImageAlpha(mem, g_peImg, 0, 0, w, h, pal().previewBg);
+    SetBkMode(mem, TRANSPARENT);
+    HGDIOBJ of = SelectObject(mem, g_headerFont);
+    // far ones first, so near ones sit on top
+    std::vector<std::pair<float, int>> order;
+    std::vector<std::pair<float, float>> at(g_pePts.size());
+    for (size_t k = 0; k < g_pePts.size(); ++k) {
+        float sx, sy, d;
+        if (!nfsnl::projectPoint(g_peView, w, h, g_pePts[k].pos, sx, sy, d)) continue;
+        at[k] = { sx, sy };
+        order.push_back({ -d, (int)k });
+    }
+    std::sort(order.begin(), order.end());
+    for (auto& o : order) {
+        int k = o.second;
+        bool sel = k == g_peSel;
+        int rad = sel ? 7 : 4;
+        COLORREF c = sel ? RGB(0xF0, 0x40, 0x40) : peColour(g_pePts[k].name);
+        HBRUSH b = CreateSolidBrush(c);
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x10, 0x10, 0x14));
+        HGDIOBJ obr = SelectObject(mem, b), opn = SelectObject(mem, pen);
+        int x = (int)at[k].first, y = (int)at[k].second;
+        Ellipse(mem, x - rad, y - rad, x + rad + 1, y + rad + 1);
+        SelectObject(mem, obr);
+        SelectObject(mem, opn);
+        DeleteObject(b);
+        DeleteObject(pen);
+        if (sel) {
+            std::wstring t = widen(g_pePts[k].name);
+            SetTextColor(mem, RGB(0x10, 0x10, 0x14));
+            TextOutW(mem, x + 11, y - 9, t.c_str(), (int)t.size());
+            SetTextColor(mem, RGB(0xFF, 0xFF, 0xFF));
+            TextOutW(mem, x + 10, y - 10, t.c_str(), (int)t.size());
+        }
+    }
+    SelectObject(mem, of);
+    BitBlt(dc, r.left, r.top, w, h, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, ob);
+    DeleteObject(bm);
+    DeleteDC(mem);
+}
+static int pePick(int mx, int my) {
+    int w = g_peViewRect.right - g_peViewRect.left, h = g_peViewRect.bottom - g_peViewRect.top;
+    int best = -1;
+    float bestD = 14.0f * 14.0f, bestDepth = 1e30f;
+    for (size_t k = 0; k < g_pePts.size(); ++k) {
+        float sx, sy, d;
+        if (!nfsnl::projectPoint(g_peView, w, h, g_pePts[k].pos, sx, sy, d)) continue;
+        float dx = sx - (mx - g_peViewRect.left), dy = sy - (my - g_peViewRect.top);
+        float dd = dx * dx + dy * dy;
+        if (dd < bestD - 4.0f || (dd < bestD + 4.0f && d < bestDepth)) { bestD = dd; bestDepth = d; best = (int)k; }
+    }
+    return best;
+}
+
+static LRESULT CALLBACK PointsEditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    LRESULT themed;
+    if (msg != WM_ERASEBKGND && ttMessage(g_peTheme, hwnd, msg, wp, lp, themed)) return themed;
+    switch (msg) {
+    case WM_ERASEBKGND: {
+        // the viewer paints itself; the rest takes the theme's background
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HRGN all = CreateRectRgnIndirect(&rc), view = CreateRectRgnIndirect(&g_peViewRect);
+        CombineRgn(all, all, view, RGN_DIFF);
+        FillRgn((HDC)wp, all, g_bgBrush ? g_bgBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        DeleteObject(all);
+        DeleteObject(view);
+        return 1;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        pePaint(hwnd, dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        POINT p = { (short)LOWORD(lp), (short)HIWORD(lp) };
+        if (!PtInRect(&g_peViewRect, p)) break;
+        g_peDrag = true;
+        g_peMoved = false;
+        g_peFrom = p;
+        SetCapture(hwnd);
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (g_peDrag) {
+            POINT p = { (short)LOWORD(lp), (short)HIWORD(lp) };
+            int dx = p.x - g_peFrom.x, dy = p.y - g_peFrom.y;
+            if (!g_peMoved && dx * dx + dy * dy < 9) return 0;
+            g_peMoved = true;
+            g_peView.yaw += dx * 0.01f;
+            g_peView.pitch = std::max(-1.5f, std::min(1.5f, g_peView.pitch + dy * 0.01f));
+            g_peFrom = p;
+            g_peImgDirty = true;
+            InvalidateRect(hwnd, &g_peViewRect, FALSE);
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if (g_peDrag) {
+            g_peDrag = false;
+            ReleaseCapture();
+            if (!g_peMoved) {
+                int k = pePick((short)LOWORD(lp), (short)HIWORD(lp));
+                if (k >= 0) peSelect(k, false);
+            }
+            return 0;
+        }
+        break;
+    case WM_LBUTTONDBLCLK: {
+        // a point picked twice: look at it from close by
+        int k = pePick((short)LOWORD(lp), (short)HIWORD(lp));
+        if (k >= 0) {
+            peSelect(k, false);
+            for (int c = 0; c < 3; ++c) g_peView.centre[c] = g_pePts[k].pos[c];
+            g_peView.distance = std::max(0.6f, g_peView.radius * 0.6f);
+            g_peImgDirty = true;
+            InvalidateRect(hwnd, &g_peViewRect, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        float steps = (short)HIWORD(wp) / 120.0f;
+        g_peView.distance = std::max(0.2f, std::min(200.0f, g_peView.distance * std::pow(0.88f, steps)));
+        g_peImgDirty = true;
+        InvalidateRect(hwnd, &g_peViewRect, FALSE);
+        return 0;
+    }
+    case WM_NOTIFY: {
+        NMHDR* nh = (NMHDR*)lp;
+        if (nh->idFrom == IDC_PE_LIST && nh->code == kLvnItemChanged) {
+            NMLISTVIEW* nl = (NMLISTVIEW*)lp;
+            if ((nl->uNewState & LVIS_SELECTED) && nl->iItem >= 0 && (size_t)nl->iItem < g_pePts.size() && nl->iItem != g_peSel)
+                peSelect(nl->iItem, true);
+        }
+        break;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDC_PE_APPLY: {
+            if (g_peSel < 0) { MessageBoxW(hwnd, L"Pick a point first - in the list, or click it on the car.", L"Car points", MB_ICONINFORMATION); return 0; }
+            float p[3];
+            for (int k = 0; k < 3; ++k) {
+                wchar_t b[64];
+                GetWindowTextW(k == 0 ? g_peX : k == 1 ? g_peY : g_peZ, b, 64);
+                wchar_t* e = nullptr;
+                p[k] = (float)wcstod(b, &e);
+                if (e == b) { MessageBoxW(hwnd, L"X, Y and Z are numbers in metres (a dot for decimals).", L"Car points", MB_ICONWARNING); return 0; }
+            }
+            peMove(p);
+            return 0;
+        }
+        case IDC_PE_XM: peNudge(0, -1); return 0;
+        case IDC_PE_XP: peNudge(0, 1); return 0;
+        case IDC_PE_YM: peNudge(1, -1); return 0;
+        case IDC_PE_YP: peNudge(1, 1); return 0;
+        case IDC_PE_ZM: peNudge(2, -1); return 0;
+        case IDC_PE_ZP: peNudge(2, 1); return 0;
+        case IDC_PE_SAVE: peSave(hwnd); return 0;
+        case IDC_PE_REVERT:
+            g_pePts = g_peSaved;
+            for (size_t k = 0; k < g_pePts.size(); ++k) peRow((int)k);
+            peShowSel();
+            peRefreshModel();
+            return 0;
+        case IDC_PE_CLOSE:
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        if (peChanged()) {
+            int a = MessageBoxW(hwnd, L"Some points were moved and not saved.\n\nSave them now?", L"Car points",
+                                MB_YESNOCANCEL | MB_ICONQUESTION);
+            if (a == IDCANCEL) return 0;
+            if (a == IDYES && !peSave(hwnd)) return 0;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_peWnd = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void openPointsEditor(HWND owner, const Bytes& model, const Bytes& points, const std::string& car,
+                             const std::string& target, const Bytes& shared) {
+    std::vector<nfsnl::Hardpoint> pts = nfsnl::rr3ReadPoints(points.data(), points.size());
+    if (pts.empty()) {
+        MessageBoxW(owner, L"The car's .points file holds no points the tool can read.", L"Car points", MB_ICONWARNING);
+        return;
+    }
+    if (g_peWnd) DestroyWindow(g_peWnd);
+    g_peRaw = nfsnl::loadModel(model.data(), model.size());
+    g_pePts = g_peSaved = pts;
+    g_peFile = points;
+    g_peTarget = target;
+    g_peCar = car;
+    g_peSel = -1;
+    g_peWheels = shared.empty() ? nfsnl::Model() : nfsnl::loadModel(shared.data(), shared.size());
+    g_peShown = g_peRaw;
+    nfsnl::rr3PlaceParts(g_peShown, g_pePts);
+    if (g_peWheels.valid) nfsnl::rr3AttachWheels(g_peShown, g_peWheels, g_pePts);
+    g_peView = nfsnl::RenderView();
+    g_peView.lodFilter = "LOD00";
+    g_peView.floor = true;
+    nfsnl::frameModel(g_peShown, g_peView);
+    g_peImgDirty = true;
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_DBLCLKS;
+        wc.lpfnWndProc = PointsEditorProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"MonkeyToolPointsEditor";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    g_peWnd = CreateWindowExW(0, L"MonkeyToolPointsEditor", (L"Car points - " + widen(car)).c_str(),
+                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1220, 760, owner, nullptr, g_inst, nullptr);
+    if (!g_peWnd) return;
+    RECT rc;
+    GetClientRect(g_peWnd, &rc);
+    int panelX = rc.right - 420, pw = 410;
+    g_peViewRect = { 0, 0, panelX - 10, rc.bottom };
+    g_peTheme = ToolTheme();
+    char kind = 's';
+    auto font = [&](HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_headerFont, TRUE); g_peTheme.ctl.push_back({ h, kind }); return h; };
+    auto label = [&](const wchar_t* t, int x, int y, int w, int h = 20) {
+        kind = 's';
+        return font(CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE, x, y, w, h, g_peWnd, nullptr, g_inst, nullptr));
+    };
+    auto edit = [&](int x, int y, int w) {
+        kind = 'e';
+        return font(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, x, y, w, 24, g_peWnd, nullptr, g_inst, nullptr));
+    };
+    auto button = [&](const wchar_t* t, int id, int x, int y, int w, int h = 28) {
+        kind = 'b';
+        return font(CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, x, y, w, h, g_peWnd, (HMENU)(INT_PTR)id, g_inst, nullptr));
+    };
+    int x = panelX, y = 10;
+    kind = 'l';
+    g_peList = font(CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                    x, y, pw, 380, g_peWnd, (HMENU)(INT_PTR)IDC_PE_LIST, g_inst, nullptr));
+    SendMessageW(g_peList, kLvmSetExStyle, 0x20, 0x20);      // full row select
+    lvInsertColumn(g_peList, 0, 196, L"Point");
+    lvInsertColumn(g_peList, 1, 66, L"X");
+    lvInsertColumn(g_peList, 2, 66, L"Y");
+    lvInsertColumn(g_peList, 3, 66, L"Z");
+    for (size_t k = 0; k < g_pePts.size(); ++k) {
+        std::wstring n = widen(g_pePts[k].name);
+        LVITEMW it{};
+        it.mask = LVIF_TEXT;
+        it.iItem = (int)k;
+        it.pszText = &n[0];
+        SendMessageW(g_peList, kLvmInsertItemW, 0, (LPARAM)&it);
+        peRow((int)k);
+    }
+    y += 392;
+    label(L"X", x, y + 4, 14); g_peX = edit(x + 16, y, 84);
+    label(L"Y", x + 108, y + 4, 14); g_peY = edit(x + 124, y, 84);
+    label(L"Z", x + 216, y + 4, 14); g_peZ = edit(x + 232, y, 84);
+    button(L"Set", IDC_PE_APPLY, x + 326, y - 2, 84);
+    y += 36;
+    button(L"X -", IDC_PE_XM, x, y, 62); button(L"X +", IDC_PE_XP, x + 66, y, 62);
+    button(L"Y -", IDC_PE_YM, x + 140, y, 62); button(L"Y +", IDC_PE_YP, x + 206, y, 62);
+    button(L"Z -", IDC_PE_ZM, x + 280, y, 62); button(L"Z +", IDC_PE_ZP, x + 346, y, 62);
+    y += 36;
+    label(L"Step:", x, y + 4, 40);
+    kind = 'c';
+    g_peStep = font(CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                    x + 44, y, 110, 200, g_peWnd, (HMENU)(INT_PTR)IDC_PE_STEP, g_inst, nullptr));
+    for (const wchar_t* t : { L"1 mm", L"5 mm", L"1 cm", L"5 cm", L"10 cm" }) SendMessageW(g_peStep, CB_ADDSTRING, 0, (LPARAM)t);
+    SendMessageW(g_peStep, CB_SETCURSEL, 2, 0);
+    kind = 'r';
+    g_peTwin = font(CreateWindowExW(0, L"BUTTON", L"Move the other side's twin too", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                    x + 168, y + 2, 240, 22, g_peWnd, (HMENU)(INT_PTR)IDC_PE_TWIN, g_inst, nullptr));
+    SendMessageW(g_peTwin, BM_SETCHECK, BST_CHECKED, 0);
+    y += 36;
+    g_peInfo = label(L"Drag on the car to turn it, wheel to zoom. Click a point to pick it; double-click to look at "
+                     L"it from close by. Metres: X across the car (- is the left side), Y up, Z along it (- is the front). "
+                     L"Yellow: lights, orange: exhausts, blue: wheels, green: hinges.", x, y, pw, 92);
+    button(L"Save", IDC_PE_SAVE, x, rc.bottom - 42, 120, 32);
+    button(L"Undo all", IDC_PE_REVERT, x + 128, rc.bottom - 42, 120, 32);
+    button(L"Close", IDC_PE_CLOSE, x + pw - 100, rc.bottom - 42, 100, 32);
+    ttApply(g_peWnd, g_peTheme);
+}
+
+// Tools > Edit car points: the selected car's (any of its files picked in the tree)
+static void editPointsOfSelected(HWND hwnd) {
+    std::string path;
+    HTREEITEM sel = TreeView_GetSelection(g_tree);
+    auto it = sel ? g_itemToEntry.find(sel) : g_itemToEntry.end();
+    if (it != g_itemToEntry.end()) path = g_all[it->second].path;
+    std::string car = path.empty() ? std::string() : nfsnl::rr3CarNameFor(path);
+    if (!g_profile || g_profile->id != "real_racing_3" || car.empty() || car.size() < 6) {
+        MessageBoxW(hwnd, L"Pick one of a Real Racing 3 car's files in the list first (its .m3g or .points).", L"Car points",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    std::string dir = path.substr(0, path.find_last_of("/\\") + 1);
+    Bytes model, points;
+    if (!readLibraryFile(dir + car + "_a.m3g", model) || !ccRead(dir + car + ".points", points)) {
+        if (points.empty() && !readLibraryFile(dir + car + ".points", points)) {
+            MessageBoxW(hwnd, widen("No " + car + "_a.m3g / " + car + ".points beside it.").c_str(), L"Car points", MB_ICONINFORMATION);
+            return;
+        }
+    }
+    // saved straight into the game's file
+    std::string target;
+    for (const Entry& e : g_all)
+        if (e.path == dir + car + ".points") { target = ccDiskFile(e); if (target.empty()) target = e.path; }
+    if (target.empty()) target = dir + car + ".points";
+    Bytes shared;
+    readLibraryFile(dir + car + "_shared.m3g", shared);
+    openPointsEditor(hwnd, model, points, car, target, shared);
+}
+
+// ---- installing a car mod: a folder laid out like the game's. Its cars are
+// merged into the game's lists as they are now (never the mod's own copies of
+// them, which is what made one mod wipe out another), and a car whose slot is
+// taken can go into the next free one. ----
+static void installCarMod(HWND hwnd) {
+    if (!g_profile || g_profile->id != "real_racing_3" || g_all.empty()) {
+        MessageBoxW(hwnd, L"Open Real Racing 3's game folder first - the mod goes into it.", L"Install a car mod",
+                    MB_ICONINFORMATION);
+        return;
+    }
+    if (g_busy) { MessageBoxW(hwnd, L"Still reading the game folder - one moment.", L"Install a car mod", MB_ICONINFORMATION); return; }
+    std::string folder;
+    if (!pickFolder(hwnd, L"The car mod's folder (with vehicles\\ inside)", folder)) return;
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    nfsnl::Rr3Mod mod;
+    std::string why;
+    std::vector<std::string> assets = ccAssetPaths();
+    bool ok = nfsnl::rr3ModRead(nfsnl::rr3ModScanFolder(folder), mod, assets, ccRead, why);
+    SetCursor(old);
+    if (!ok) {
+        MessageBoxW(hwnd, widen(why).c_str(), L"Install a car mod", MB_ICONWARNING);
+        return;
+    }
+    // what is in it
+    std::wstring intro = L"This mod adds:\n";
+    for (const nfsnl::Rr3ModCar& c : mod.cars)
+        intro += L"\n  " + widen(c.name) + L"  (" + widen(c.folder) + L", slot " + std::to_wstring(c.id) + L")" +
+                 (c.update ? L" - already in the game, it is updated" : L"");
+    intro += L"\n\nInstall it into the game?";
+    if (MessageBoxW(hwnd, intro.c_str(), L"Install a car mod", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    // a slot another car has: the free one, or nothing
+    for (nfsnl::Rr3ModCar& c : mod.cars) {
+        if (c.update || c.slotTakenBy.empty()) continue;
+        std::wstring q = L"Slot " + std::to_wstring(c.id) + L" is already taken by " +
+                         (c.takenByName.empty() ? widen(c.slotTakenBy) : widen(c.takenByName) + L" (" + widen(c.slotTakenBy) + L")") +
+                         L" - most likely another mod made for the same slot.\n\n"
+                         L"Installing " + widen(c.name) + L" into slot " + std::to_wstring(c.id) +
+                         L" would remove that car from the game.\n\n"
+                         L"Add " + widen(c.name) + L" in the free slot " + std::to_wstring(c.installAs) + L" instead?\n\n"
+                         L"Yes - install it as car " + std::to_wstring(c.installAs) + L"; both cars stay in the game.\n"
+                         L"No - do not install the mod.";
+        if (MessageBoxW(hwnd, q.c_str(), L"Car slot taken", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+    }
+    // the game's own files it would overwrite
+    bool replace = false;
+    if (!mod.replaces.empty()) {
+        std::wstring q = L"The mod also carries " + std::to_wstring(mod.replaces.size()) +
+                         L" of the game's own files, apart from its car(s):\n";
+        for (size_t k = 0; k < mod.replaces.size() && k < 10; ++k) q += L"\n  " + widen(mod.replaces[k]);
+        if (mod.replaces.size() > 10) q += L"\n  ...";
+        q += L"\n\nReplace those as well?\n\nYes - replace them (each original kept as .bak).\nNo - install the car(s) only.";
+        int a = MessageBoxW(hwnd, q.c_str(), L"Install a car mod", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (a == IDCANCEL) return;
+        replace = a == IDYES;
+    }
+    old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    std::vector<nfsnl::Rr3CarOutput> outs;
+    std::string report;
+    ok = nfsnl::rr3ModInstall(mod, replace, assets, ccRead, outs, report);
+    std::string list;
+    int replaced = 0, added = 0;
+    if (ok) ccWriteIntoGame(outs, list, replaced, added);
+    SetCursor(old);
+    logLine("car mod %s: %s", folder.c_str(), ok ? "installed" : "stopped");
+    if (!ok) {
+        MessageBoxW(hwnd, widen(report).c_str(), L"Install a car mod", MB_ICONWARNING);
+        return;
+    }
+    ccShowWritten(hwnd, "Car mod installed", report + "\n" + std::to_string(replaced) + " file(s) replaced and " +
+                  std::to_string(added) + " added in the game's folder (the originals kept as .bak):", list);
+    // read the folder again: the new car in the tree, and the next mod sees it
+    if (!g_gameFolder.empty()) startIndexThread(g_gameFolder);
+}
+
+static void openTrackAdder(HWND hwnd) {
+    if (!g_profile || g_profile->id != "real_racing_3") {
+        MessageBoxW(hwnd, L"New track works on Real Racing 3 - open Real Racing 3 first.", L"New track", MB_ICONINFORMATION);
+        return;
+    }
+    if (g_tkWnd) { SetForegroundWindow(g_tkWnd); return; }
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    g_tkTracks = nfsnl::rr3ListTracks(ccAssetPaths(), ccRead);
+    SetCursor(old);
+    if (g_tkTracks.empty()) {
+        MessageBoxW(hwnd, L"No Tracks/data/*.bin.nct among the files opened - open the game's whole folder, Tracks included.",
+                    L"New track", MB_ICONINFORMATION);
+        return;
+    }
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = TrackAdderProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"MonkeyToolTrackAdder";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    g_tkWnd = CreateWindowExW(0, L"MonkeyToolTrackAdder", L"New track - Real Racing 3",
+                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 760, 600, hwnd, nullptr, g_inst, nullptr);
+    if (!g_tkWnd) return;
+    RECT rc;
+    GetClientRect(g_tkWnd, &rc);
+    int cw = rc.right;
+    g_tkTheme = ToolTheme();
+    char kind = 's';
+    auto font = [&](HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_headerFont, TRUE); g_tkTheme.ctl.push_back({ h, kind }); return h; };
+    auto label = [&](const wchar_t* t, int x, int y, int w, int h = 20) {
+        kind = 's';
+        return font(CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE, x, y, w, h, g_tkWnd, nullptr, g_inst, nullptr));
+    };
+    auto edit = [&](int x, int y, int w) {
+        kind = 'e';
+        return font(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, x, y, w, 24, g_tkWnd, nullptr, g_inst, nullptr));
+    };
+    auto button = [&](const wchar_t* t, int id, int x, int y, int w, int h = 28) {
+        kind = 'b';
+        return font(CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, x, y, w, h, g_tkWnd, (HMENU)(INT_PTR)id, g_inst, nullptr));
+    };
+    int y = 12, lx = 180, fw = cw - lx - 10;
+    label(L"Start from (layout, sky, AI line):", 10, y + 4, 168);
+    kind = 'c';
+    g_tkDonor = font(CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                     lx, y, fw, 420, g_tkWnd, nullptr, g_inst, nullptr));
+    for (const nfsnl::Rr3TrackInfo& t : g_tkTracks)
+        SendMessageW(g_tkDonor, CB_ADDSTRING, 0, (LPARAM)widen(t.name + "   (" + std::to_string(t.id) + ", " + t.folder + ")").c_str());
+    SendMessageW(g_tkDonor, CB_SETCURSEL, 0, 0);
+    y += 34; label(L"Name (shown, unique):", 10, y + 4, 168); g_tkName = edit(lx, y, fw);
+    y += 32; label(L"Location (optional):", 10, y + 4, 168); g_tkLoc = edit(lx, y, fw);
+    y += 32; label(L"Country (optional):", 10, y + 4, 168); g_tkCountry = edit(lx, y, fw);
+    y += 32; label(L"Time of day label (optional):", 10, y + 4, 168); g_tkTime = edit(lx, y, fw);
+    y += 32; label(L"Own folder (optional):", 10, y + 4, 168); g_tkFolder = edit(lx, y, fw);
+    y += 32; label(L"Model (OBJ / FBX, optional):", 10, y + 4, 168); g_tkModel = edit(lx, y, fw - 44);
+    button(L"...", IDC_TK_MODELB, cw - 46, y - 1, 36, 26);
+    y += 34;
+    kind = 'e';
+    g_tkReport = font(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                                      10, y, cw - 20, rc.bottom - y - 52, g_tkWnd, nullptr, g_inst, nullptr));
+    SetWindowTextW(g_tkReport, L"A new track is a variant of one of the game's: its own id, name, location and entry in the career's "
+                               L"track list, so series can race on it. Without an own folder it uses the donor's models; with one, "
+                               L"the donor's Tracks/<folder> is copied for it and your OBJ / FBX replaces the copied models' meshes "
+                               L"by name (textures can then be imported into the copy as usual). The driving surface (collision), "
+                               L"AI racing line and timing stay the donor's - those are not built from a model.");
+    button(L"Write the files to a folder...", IDC_TK_WRITE, 10, rc.bottom - 42, 260, 32);
+    button(L"Close", IDC_TK_CLOSE, cw - 110, rc.bottom - 42, 100, 32);
+    ttApply(g_tkWnd, g_tkTheme);
+}
+
+static void openRacingSeries(HWND hwnd) {
+    if (!g_profile || g_profile->id != "real_racing_3") {
+        MessageBoxW(hwnd, L"Racing series works on Real Racing 3 - open Real Racing 3 first.", L"Racing series", MB_ICONINFORMATION);
+        return;
+    }
+    if (g_rsWnd) { SetForegroundWindow(g_rsWnd); return; }
+    std::string ev;
+    for (const Entry& e : g_all) {
+        std::string p = e.path;
+        for (char& c : p) if (c == '\\') c = '/';
+        if (p.size() >= 19 && p.compare(p.size() - 19, 19, "data/events.dat.nct") == 0) ev = e.path;
+    }
+    Bytes raw, plain;
+    if (ev.empty() || !ccRead(ev, raw)) {
+        MessageBoxW(hwnd, L"data/events.dat.nct (the career) is not among the files opened - open the game's whole depot folder.",
+                    L"Racing series", MB_ICONINFORMATION);
+        return;
+    }
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    nfsnl::nctTransform(raw.data(), raw.size(), plain);
+    std::string why;
+    bool ok = nfsnl::rr3CareerRead(plain.data(), plain.size(), g_rsCareer, why);
+    if (ok) {
+        g_rsTexts = nfsnl::Rr3Texts();
+        g_rsTexts.load(ccAssetPaths(), ccRead);
+        g_rsCarInfos = nfsnl::rr3ListCars(ccAssetPaths(), ccRead);
+        g_rsTracks = nfsnl::rr3CareerTracks(g_rsCareer);
+        std::sort(g_rsTracks.begin(), g_rsTracks.end());
+        g_rsGroups.clear();
+        for (const nfsnl::Rr3CareerGroup& g : nfsnl::rr3CareerGroups(g_rsCareer)) if (g.type == 0 || g.type == 1) g_rsGroups.push_back(g);
+    }
+    SetCursor(old);
+    if (!ok) { MessageBoxW(hwnd, widen("The career file could not be read: " + why).c_str(), L"Racing series", MB_ICONERROR); return; }
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = RacingSeriesProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"MonkeyToolRacingSeries";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    g_rsWnd = CreateWindowExW(0, L"MonkeyToolRacingSeries", L"Racing series - Real Racing 3",
+                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1060, 940, hwnd, nullptr, g_inst, nullptr);
+    if (!g_rsWnd) return;
+    g_rsSel = -1;
+    g_rsEv.clear();
+    g_rsCardPath.clear();
+    RECT rc;
+    GetClientRect(g_rsWnd, &rc);
+    int cw = rc.right;
+    g_rsTheme = ToolTheme();
+    char kind = 's';
+    auto font = [&](HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_headerFont, TRUE); g_rsTheme.ctl.push_back({ h, kind }); return h; };
+    auto label = [&](const wchar_t* t, int x, int y, int w, int h = 20) {
+        kind = 's';
+        return font(CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE, x, y, w, h, g_rsWnd, nullptr, g_inst, nullptr));
+    };
+    auto button = [&](const wchar_t* t, int id, int x, int y, int w, int h = 28, DWORD style = BS_PUSHBUTTON) {
+        kind = style == BS_PUSHBUTTON ? 'b' : 'r';
+        if (style == BS_PUSHBUTTON) style = BS_OWNERDRAW;
+        return font(CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_rsWnd,
+                                    (HMENU)(INT_PTR)id, g_inst, nullptr));
+    };
+    auto edit = [&](int id, int x, int y, int w, int h = 24, DWORD extra = ES_AUTOHSCROLL) {
+        kind = 'e';
+        return font(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | extra, x, y, w, h, g_rsWnd,
+                                    (HMENU)(INT_PTR)id, g_inst, nullptr));
+    };
+    auto combo = [&](int x, int y, int w) {
+        kind = 'c';
+        return font(CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                    x, y, w, 420, g_rsWnd, nullptr, g_inst, nullptr));
+    };
+    int y = 10;
+    label(L"Find:", 10, y + 4, 40);
+    g_rsFilter = edit(IDC_RS_FILTER, 52, y, 300);
+    button(L"Edit selected", IDC_RS_EDIT, cw - 360, y - 2, 170);
+    button(L"New series (copy selected)", IDC_RS_NEW, cw - 184, y - 2, 174);
+    y += 32;
+    kind = 'l';
+    g_rsList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                               10, y, cw - 20, 210, g_rsWnd, (HMENU)IDC_RS_LIST, g_inst, nullptr);
+    SendMessageW(g_rsList, kLvmSetExStyle, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    font(g_rsList);
+    lvInsertColumn(g_rsList, 0, 60, L"Id");
+    lvInsertColumn(g_rsList, 1, 380, L"Series");
+    lvInsertColumn(g_rsList, 2, 420, L"Where in the career menu");
+    lvInsertColumn(g_rsList, 3, 60, L"Tiers");
+    lvInsertColumn(g_rsList, 4, 70, L"Events");
+    y += 218;
+    g_rsMode = label(L"Pick a series, then Edit it, or start a New series from it.", 10, y, cw - 20);
+    y += 26;
+    int half = (cw - 30) / 2;
+    label(L"Title:", 10, y + 4, 90);
+    g_rsTitle = edit(0, 100, y, half - 90);
+    label(L"Reward at the end (car:<id>, gold:<n>, r$:<n>):", 20 + half, y + 4, 300);
+    g_rsReward = edit(0, 20 + half + 300, y, half - 300);
+    y += 30;
+    label(L"Description:", 10, y + 4, 90);
+    g_rsDesc = edit(0, 100, y, cw - 110, 46, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL);
+    y += 54;
+    // cars (left) and events (right)
+    label(L"Allowed cars (Ctrl / Shift to pick several):", 10, y, half);
+    label(L"Events (tier, type, track, laps):", 20 + half, y, half);
+    y += 22;
+    kind = 'x';
+    g_rsCars = font(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_EXTENDEDSEL | LBS_NOTIFY,
+                                    10, y, half, 250, g_rsWnd, (HMENU)IDC_RS_CARS, g_inst, nullptr));
+    for (const nfsnl::Rr3CarInfo& c : g_rsCarInfos) {
+        char b[200];
+        snprintf(b, sizeof(b), "%4u  %s %s %s", c.id, c.year.c_str(), c.make.c_str(), c.model.c_str());
+        SendMessageW(g_rsCars, LB_ADDSTRING, 0, (LPARAM)widen(b).c_str());
+    }
+    kind = 'l';
+    g_rsEvents = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                 20 + half, y, half, 180, g_rsWnd, nullptr, g_inst, nullptr);
+    SendMessageW(g_rsEvents, kLvmSetExStyle, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    font(g_rsEvents);
+    lvInsertColumn(g_rsEvents, 0, 44, L"Tier");
+    lvInsertColumn(g_rsEvents, 1, 110, L"Type");
+    lvInsertColumn(g_rsEvents, 2, 250, L"Track");
+    lvInsertColumn(g_rsEvents, 3, 50, L"Laps");
+    int ex = 20 + half, ey = y + 186;
+    g_rsTrack = combo(ex, ey, half - 200);
+    for (const std::string& t : g_rsTracks) SendMessageW(g_rsTrack, CB_ADDSTRING, 0, (LPARAM)widen(t).c_str());
+    SendMessageW(g_rsTrack, CB_SETCURSEL, 0, 0);
+    g_rsType = combo(ex + half - 194, ey, 194);
+    for (const wchar_t* n : kRsTypeNames) SendMessageW(g_rsType, CB_ADDSTRING, 0, (LPARAM)n);
+    SendMessageW(g_rsType, CB_SETCURSEL, 0, 0);
+    ey += 32;
+    label(L"Laps:", ex, ey + 4, 40);
+    g_rsLaps = edit(0, ex + 42, ey, 50);
+    SetWindowTextW(g_rsLaps, L"2");
+    label(L"Tier:", ex + 102, ey + 4, 36);
+    g_rsTier = edit(0, ex + 140, ey, 44);
+    SetWindowTextW(g_rsTier, L"1");
+    button(L"Add event", IDC_RS_EVADD, ex + 194, ey - 2, 120);
+    button(L"Remove selected", IDC_RS_EVDEL, ex + 320, ey - 2, half - 320);
+    y += 258;
+    // where it shows
+    g_rsInGroup = button(L"Show it in the group:", IDC_RS_INGROUP, 10, y, 190, 24, BS_AUTORADIOBUTTON);
+    g_rsGroup = combo(204, y, cw - 214);
+    for (const nfsnl::Rr3CareerGroup& g : g_rsGroups) {
+        std::string t = g_rsTexts.get(g.key);
+        SendMessageW(g_rsGroup, CB_ADDSTRING, 0, (LPARAM)widen(g.path + (t.empty() ? "" : "  - " + t)).c_str());
+    }
+    for (size_t k = 0; k < g_rsGroups.size(); ++k) if (g_rsGroups[k].key == "STREAM_GROUP_AMATEUR") SendMessageW(g_rsGroup, CB_SETCURSEL, k, 0);
+    SendMessageW(g_rsInGroup, BM_SETCHECK, BST_CHECKED, 0);
+    y += 32;
+    g_rsNewGroupR = button(L"In a new group named:", IDC_RS_NEWGROUP, 10, y, 190, 24, BS_AUTORADIOBUTTON);
+    g_rsNewGroup = edit(0, 204, y, 300);
+    button(L"Card picture...", IDC_RS_CARDB, 514, y - 2, 150);
+    g_rsCard = label(L"(none: the copied group's card)", 672, y + 4, cw - 682);
+    y += 36;
+    kind = 'e';
+    g_rsReport = font(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                                      10, y, cw - 20, rc.bottom - y - 52, g_rsWnd, nullptr, g_inst, nullptr));
+    int by = rc.bottom - 42;
+    button(L"Make it (then Save)", IDC_RS_PENDING, 10, by, 210, 32);
+    button(L"Write the files to a folder...", IDC_RS_WRITE, 228, by, 260, 32);
+    button(L"New track...", IDC_RS_TRACK, 496, by, 150, 32);
+    button(L"Close", IDC_RS_CLOSE, cw - 110, by, 100, 32);
+    ttApply(g_rsWnd, g_rsTheme);
+    rsFillList();
+    char b[400];
+    snprintf(b, sizeof(b), "The career: %zu series, %zu tiers, %zu tracks. Series are listed in the career menu's groups; "
+             "their allowed cars and events live on their tiers. A new series copies the layout, rewards and AI of the "
+             "one it starts from, gets new ids, and is shown in the group you choose - or in a new group with your own "
+             "card picture (added as a page of the events/career sprite atlas).",
+             g_rsCareer.series.size(), g_rsCareer.tiers.size(), g_rsTracks.size());
+    rsReport(b);
+}
+
+// the tool windows follow a theme change made while they are open
+static void retheme_tool_windows() {
+    if (g_ccWnd) ttApply(g_ccWnd, g_ccTheme);
+    if (g_rsWnd) ttApply(g_rsWnd, g_rsTheme);
+    if (g_tkWnd) ttApply(g_tkWnd, g_tkTheme);
 }
 
 // Import > a model into a Real Racing 3 .m3g: the OBJ / FBX's objects replace

@@ -492,6 +492,29 @@ that dump is what to send back.
 The same code path also unlocks **LZHAM cabinets** inside `.pack` archives,
 which earlier versions skipped.
 
+### The China build (Tencent, `com.tencent.tmgp.NFSNL`)
+
+* Its OBB (`main.<n>.com.tencent.tmgp.NFSNL.obb.png`) is the same FMOBB container as the other
+  builds, but most files are packed with **LZMA**: the index marks them with flag 1 and the
+  data starts with the usual properties byte (`5D`), the dictionary size (4 bytes) and the
+  range-coded stream, with no size field (the index gives it). `src/nfsnl_lzma.cpp` decodes it.
+* `.sb` files decrypt with the usual key, then hold `ZBIN` + gzip, inside which is an SBIN
+  version 3 file without a `STRU` block. Their text export works; the tool does not yet read the
+  colours or car setups from them, so China cars open with the plain textures.
+* The base OBB carries only the car's small `_reflection` masks (64 × 64, magenta paint, yellow
+  lights); the full colour textures come with the game's in-game download, which is not in the
+  APK.
+* Its cars are `.m3g` models that name their meshes the `.sb3d` way (`mesh_<part>_<kit>`), so
+  body kits are worked out after loading, as for `.sb3d` cars.
+* A police livery `.sba` that names a plain texture falls back to `_diffuse_reflection` /
+  `_diffuse` versions of the name.
+
+### Body kits in exports
+
+A car with body kits is saved the way the viewer shows it (the kit chosen in the list) or with
+every part of every kit visible - the export asks. The command line takes
+`one <car> <out> --kit stock|all|<letter>`.
+
 ### JSR-184 M3G (No Limits' older builds)
 
 This is the general reader, the one that finds its offsets by trial. Real
@@ -679,9 +702,14 @@ frame is what you see and what gets saved.
 An `.etc.dds` is a standard 128-byte DDS header. The FourCC at offset 84 says
 what follows: `ETC ` for ETC1 blocks, or nothing at all for an uncompressed
 16-bit format. Both decode here, so the `real_racing_3_dds.bms` -> `.pvr` ->
-PVRTexTool detour is not needed. ATITC (`ATC `/`ATCI`) is declared by some
-builds and has no decoder anywhere useful; the tool says so rather than showing
-you noise.
+PVRTexTool detour is not needed. The Adreno build's `.atc.dds` (ATITC, for
+Qualcomm GPUs) decodes too: FourCC `ATC ` is RGB, `ATCA` RGB with explicit
+4-bit alpha (laid out like DXT3), `ATCI` RGB with interpolated alpha (like DXT5).
+Importing a picture into one writes the same format back.
+
+**Two UV sets.** A track's meshes carry a second set of texture coordinates for
+the baked lighting (lightmaps). Both are read; FBX exports write the second as
+`UVChannel_2` (OBJ has room for one set only).
 
 **The channel order is read, not assumed.** The header carries a mask per
 channel, and Real Racing 3 puts red in the *high* nibble:
@@ -846,6 +874,35 @@ and all three now run when you open or export a model:
   nearer the origin than the point, so the arms, which hang 0.2 to 0.3 off
   their pivot, are caught as well. An interior with no `_int.points` of its
   own uses the car's main `.points`.
+* **The outside model's steering wheel** (`LOD_A_STEERING_WHEEL_mm_cab`) has
+  no point of its own: the exterior `.points` has only `POINT_DRIVER`. It is
+  not modelled around the same centre as the cockpit's wheel.
+  * On the 2018 911 GT3 RS the cockpit's wheel spans z +0.04..+0.12 off its
+    point, and the outside one spans -0.11..+0.02.
+  * So the cockpit's point alone pushes the outside wheel 12.8 cm into the
+    dashboard.
+  * The tool places the cockpit's wheel (`<car>_int_a.m3g` on its
+    `_int.points`) and centres the outside wheel on it, one group per LOD.
+  * Shifts seen: 935 0.3 cm, Evija 1.4, SF24 1.4, RX-3 5.9, Megane 7.7,
+    Zenvo 8.7, Taycan 11.7, GT3 RS 12.8.
+  * A shift over 30 cm is not made.
+  * Without the cockpit model the point is used as before.
+* **Hinges turn what they carry.**
+  * A hinge record (type 2) holds a 3x3 basis after its position. Its rows are the part's
+    forward, left and up in the car's axes.
+  * The Ferrari SF24's `HINGE_STEERING_WHEEL` is exactly the frame the part is modelled in:
+    forward (0,0,-1), left (-1,0,0), up (0,1,0).
+  * The Taycan Turbo GT's up is (0, 0.966, -0.259), a 15-degree rake with the top towards the
+    dashboard.
+  * The part turns by `R = B^T * M0`, where M0 is that neutral frame.
+  * The game's hardpoint names (libRealRacing3.so, a table of 79) include `POINT_STEERING_WHEEL`
+    (6) and `HINGE_STEERING_WHEEL` (57).
+  * A plain point states no angle, and the game has no rake setting of its own.
+* **Needles** turn on `HINGE_NEEDLE_SPEED` / `HINGE_NEEDLE_RPM`, the dial's centre and the dial
+  face's tilt.
+  * `POINT_NEEDLE_*_1`, `_2` and `_3` are marks round the dial's edge. On the Megane, `_1` is
+    the zero at the lower left and `_3` the top of the scale at the lower right.
+  * A needle at rest points at `_1`.
 * **`<car>_shared.m3g`** is where the wheels live (see above).
 * **`<part>.banim`** carries the rest pose of a part that moves. The Agera R's
   rear wing is modelled at the origin - x +/-0.918, y -0.019..0.093 - and its
@@ -856,68 +913,208 @@ and all three now run when you open or export a model:
 Anything still sitting on the origin after all three is named in the preview
 rather than quietly left there.
 
-### Car data: `.nct` and menus: `.gui`
+### Real Racing 3's scrambled files: `.nct`, `.gui` and the text files
 
 `106_2011_pagani_huayra.bin.nct` is a car's data file,
-`1969_dodge_charger_rt.liveries.bin.nct` a car's livery list, and
-`custom_menu_japan_gp.gui` a menu. All three use the same scheme. The file is
-not compressed and not really encrypted: **one fixed pad is XORed over it from
-byte 0, and it is the same pad for every file**. You can prove that without
-knowing the pad: XOR two files together and the pad cancels, leaving readable
-fragments of one against the other.
+`1969_dodge_charger_rt.liveries.bin.nct` a car's livery list, `data/events.dat.nct`
+the career and `custom_menu_japan_gp.gui` a menu. All of them are scrambled the same
+way: **one keystream XORed over the file from byte 0, the same keystream for every
+file**, so encoding and decoding are the same operation.
 
-The generator was not identified. A repeating key of every length up to 534,
-several LCGs, xorshift, `java.util.Random` and glibc `rand` were each tested
-and ruled out. So the pad is recovered from the files themselves, as
-weighted votes that are never pinned by one clue alone:
+The keystream is **RC4 with a non-standard start**. The game's loader (in
+`libRealRacing3.so`, at `0x12bc330` in the arm64 build of 14.0.1) does this:
 
-* **The car's own name.** A liveries file carries it at byte 4, spelled
-  exactly as its file name has it. Cars have names of different lengths, so
-  between them they cover every offset in that stretch.
-* **The record layout.** A liveries file is a texture table (`u32 id`,
-  `u32 length`, then a path) and every path ends `.ptc.pvr.z`. The walker
-  finds where each string has to end, so the record's zero bytes, its length
-  byte and its tail all vote. Where the length byte is already known from
-  another car's name, the walk continues on it at a lower weight. A wrong
-  guess implies a different pad byte in every file and is outvoted; a right
-  one implies the same byte each time and adds up.
-* **Struct padding** in the per-car data files: at an offset where most cars
-  hold zero, the commonest ciphertext byte *is* the pad byte. Where every
-  file agrees, zero padding and a shared constant look the same, so those
-  offsets are left out.
-* **XML.** At an offset several `.gui` files reach, only one pad byte turns
-  every one of them into characters XML is made of.
+1. It fills the 256-byte state from a table in the library instead of the usual
+   0..255. The table is in `src/nct_rc4.inc`.
+2. It runs the RC4 key schedule over that state with an 8-byte key
+   (`a5 35 b3 b1 e8 43 e7 cf`).
+3. It runs 133 output steps and throws their bytes away (i = 1..133).
+4. It XORs the following output bytes over the file.
 
-Tested on a synthetic game (250 cars, a pad the learner had never seen): every
-offset up to 800 was recovered, 3,897 of the first 4,000 were certain, and one
-was wrong. With the liveries files alone, every offset they reach was
-recovered with none wrong.
+The first output bytes are `da d5 18 a8 2c 06 85 ed`, the same bytes earlier versions
+of the tool had recovered statistically from FlatBuffers headers.
 
-The pad that ships with the tool was re-learned this way from the twelve real
-files on hand: 1657 certain bytes of 5781, up from 1505. Its own check agreed
-with 100% of the bytes it already pinned. **File → Finish the .nct pad from
-this game...** runs the same learner over every `.nct` and `.gui` in your
-install and saves the result as `nct_pad.bin` beside the program.
+`gametext.txt` and `text_<language>.txt` use the same starting table with their
+own key (`b1 75 a5 23 f3 c2 b6 15`) and drop 211 bytes (loader at `0x109ac28`).
+`gametext.txt` holds the keys, one per line (`GAMETEXT_CAR_NAME_HUAYRA`); each
+language file holds that key's text on the same line. The loader skips decoding
+when `gametext.txt` already starts with `GAMETEXT_`.
 
-What the text view shows:
+**Editing.** Save a `.nct` as **bin** (or a `.gui` as **xml**), edit it, and use
+**Tools → Encode an edited file back**: the whole file comes out exactly as the game
+reads it. The text files open in the data editor as text and are scrambled again
+when saved.
 
-* **Liveries**: the car, the texture table (id, path, and `?` on anything
-  that runs over an uncertain byte), then the livery entries after it
-  (`01_<car>.livery`, the `livery/<car>_ext_<name>.ptc.pvr.z` it paints with).
-  Ids below 100 are the game's shared textures (`common/...`); the rest
-  belong to the car.
-* **Car data**: car id, model year and every string with its offset.
-* **`.gui`**: the menu's XML.
+### What the game believes it has: `asset_list_base.txtCache.txt`
 
-**Editing.** Save a `.nct` as **bin** (or a `.gui` as **xml**), edit it, and
-use **Tools → Encode an edited file back**. It is the same XOR, so a byte you
-do not touch comes back exactly as it went in, whether or not the pad has
-that byte right. A byte you change, or one that moves because you inserted
-something before it, is only right where the pad is certain. When the
-original is open in the tool, the encoder compares the two and tells you how
-many changed bytes fall on uncertain offsets. To add a livery, add its
-texture record and its livery entry and raise the texture count that follows
-the car's name.
+| Part | What |
+|------|------|
+| u32 `0xA4F6F39D`, u32 4 | a fixed magic and the cache version (`AssetManager::LoadCacheList`). The magic is not a checksum |
+| a line | the asset list version, e.g. `7469` |
+| lines | `/path<TAB>md5` for every file downloaded, md5 of the file as stored |
+
+New files the tool writes are added with their own md5. A file the list already
+names keeps the official md5 by default. The game decides what to download by
+comparing the server's list with this one, so a changed file stays changed.
+
+### A car's data: `vehicles/data/<id>_<car>.bin.nct`
+
+Decoded, a car's data file is a run of little-endian fields, each a 4-byte number
+or a string (u32 length, the characters, no terminator; an empty string is four
+zero bytes). The order is the same in all 540 cars, so the fields are found by
+their place:
+
+| Fields | What |
+|--------|------|
+| u32, u32 | 0; the car id (as in the file name) |
+| 3 strings | year, make, model |
+| u32, string | 100; class (`Race`, `Supercar`, `Prod`) |
+| 13 numbers | u32, u32, weight (lb), top speed and top speed fully upgraded (mph), u32, u32, then floats: 0-60 mph (s), braking 60-0 (ft) and cornering grip (g), each stock and fully upgraded |
+| string | drivetrain (`RWD`, `AWD`, `FWD`, `RLY`) |
+| 13 fields | the engine sound: accel and decel sample paths (`audio/Vehicles/<set>/id_<id>_accel`), idle, three levels, u32, the `bf_` and `_ovrun` families, three numbers, one more string |
+| ... | transmission and shift sounds, cameras, turbo sounds |
+| 2 strings | aspiration (`Turbo`, `Nat`, `Super`, `None`), engine position (`F`, `M`, `R`, `FM`) |
+| 13 + gears numbers | gears, u32, top gear ratio, final drive, power (hp), power rpm, torque (lb-ft), torque rpm, redline, limiter, shift up, shift down, one ratio per gear, reverse |
+| string | upgrade / handling package (`PROD_04`, `SUPER_03`, or the car's own); its upgrades are in `carupgrade.upgrades.nct` under that name |
+| string | unlock condition (`QUEST:...`, `ROUND:...;LTS:...`), empty for a car sold at the dealer |
+| 3 u32, u32 | 0 x 3; the **appearance index**, which picks the car's model folder (below) |
+| u32, u32, 3 u32 | 0, a date (unix, some cars), 0 x 3 |
+| u32, u32, ... | price (R$), price (gold), ..., 86400, 1 x 5 |
+| 2 strings | `CAR_MANUFACTURER_<x>`, `CAR_NAME_<x>`: the keys the menus look the names up by |
+| 3 u32, 2 floats | performance rating, stock and fully upgraded |
+
+Checked against public figures: the 2010 BMW M3 GTS says 3538 lb, 190 mph, 4.4 s,
+444 hp at 8300 rpm and 325 lb-ft at 3750 rpm; the Pagani Huayra 2976 lb, 730 hp,
+738 lb-ft, PR 65.4. `monkeytool_cli rr3car show <file>` lists them; re-written
+field by field, 535 of the 540 files come back byte for byte.
+
+Re-written field by field, all 540 files come back byte for byte. The menus show
+the names through the `CAR_NAME_` / `CAR_MANUFACTURER_` keys (`GAMETEXT_` + key in
+the text files).
+
+### The car list and what a car needs
+
+The data file never names the car's model folder. The appearance index links them,
+and that is why `7_2013_chevrolet_camaro_zl1.bin` has its models in
+`vehicles/2013_chevrolet_camarozl1/`.
+
+| File (under `vehicles/data/`) | Layout |
+|------|--------|
+| `cardesc.list.nct` | every car's data file name: u32 length + `<id>_<name>.bin`, sorted by id, no count |
+| `carappearances.appearances.nct` | u32 23 (version), u32 count, then per car: u32 appearance index, the model folder name, then its look (exhaust flames, lights...). Records vary in length |
+| `cardamagethresholds.damage.nct` | u32 count, then 116 bytes per car, starting with the car id, sorted by id |
+| `suspensionbehaviour.suspensiondata.nct` | u32 1, u32 count, then 140 bytes per car, starting with the car id |
+| `liveries/<folder>.liveries.bin.nct` | below |
+
+**A liveries list:** the folder name, then:
+
+1. The texture table: u32 count, then each entry as u32 slot and a path such as `livery/<folder>_ext_black.ptc.pvr.z`. The device reads `.etc.dds.z` / `.atc.dds.z` in place of `.ptc.pvr.z`.
+2. The mesh-to-material table: u32 count, then (u32, u32) pairs.
+3. A third table: u32 count, then (u32, u32, u32) triples.
+4. The liveries: u32 count, then each livery as:
+   * the file name, `01_<folder>.livery`;
+   * the **name the game shows** (often empty: the colour's own name is used);
+   * 8 bytes;
+   * swatch picture, then team logo;
+   * a byte;
+   * driver arm texture, then driver suit texture;
+   * 4 bytes;
+   * the livery button's colour, as 3 bytes R G B;
+   * its texture overrides (u32 count, then slot + path);
+   * its material overrides (u32 count, then pairs).
+
+Slots and materials are indices into `liveryStringTable.bin.nct` (u32 count, then
+strings such as `ext_ext`, `car_paint_metallic_white`). All 540 lists read to their
+last byte.
+
+**A new car** (`rr3car add`, the car creator's "Add a new car") is all of these:
+
+* the donor's folder copied under the new name. The model files do not name their
+  folder, so a rename is enough;
+* a new data file with the next free id and a new appearance index;
+* the liveries list renamed and rebuilt;
+* one more entry in each list above;
+* the name key added to `gametext.txt` and every language file;
+* the new files added to the asset list.
+
+### The career: `data/events.dat.nct`
+
+`RRCE`, version 0x82 (loader at `0xc74fb8`). Little-endian; strings are u32 length
+plus bytes; lists are an i32 count followed by the elements. Read in this order:
+
+1. 3 x 17 lists of f32: the reward and fame scale per finishing position, indexed
+   by event type.
+2. Tracks: display name, f32, bool. This is the track list events may use.
+3. **Series** (1602): id, title key, type (7 = limited time), description key,
+   three (x, y) curves, requirement groups (type, a, b, text: `SERIES`,
+   `UNLOCK_IF_OWN_CAR`...), i32, 2 bools, completion reward (`car:219`), reward id,
+   i32, bool.
+4. **Tiers** (21,767). Each has:
+   * name key, display key, index in its series, tier id, series id, unlock type,
+     trophies needed, bool;
+   * the **allowed cars** (i32 car id + a flag byte);
+   * sponsor and two trackside banner sets;
+   * the **events**. Each event has its type (0 elimination, 1 head to head,
+     2 cup, 4 endurance, 7 speed record, 10 speed snap, 11 drag race, 13 time trial),
+     event id, the **track's display name**, laps, three i32, fame, reward,
+     currency, a parameter string, then 30-odd tuning fields (one optional block:
+     a byte, then u8 + 2 f32 when it is not 0).
+5. The career menu. Super groups (Motorsports, Career) each hold a tree of group
+   nodes:
+   * name key, flavour key, card picture, logo, loading screen, brand logos, asset
+     packs, locked message;
+   * then children;
+   * then, for types 0 and 1, **pages of series ids**. Type 2 nodes (the F1 hubs)
+     carry their own lists.
+6. AI name pools (count before name), AI grids, AI drivers, rolling starts,
+   limited-time series (they point at a series by its **index** in the list, so new
+   series go at the end) and reward schedules.
+
+The tool reads and writes it byte for byte. A new series:
+
+* copies a template series, with new ids for the series, its tiers and its events;
+* gets its allowed cars on every tier and its events on the chosen tracks;
+* is listed on a page of a group, or of a new group in the Career menu.
+
+A new group's card is a page added to `gui_assets/<size>/events/career/sprites.android.atlas`:
+
+* the image is added with `<pos id="n">`;
+* the page itself is `sprites_<n>.rgb.pvr.z`: PVR (v2 header), 32-bit RGBA, rows
+  bottom-up, `.z`-wrapped.
+
+### Tracks: `Tracks/data/<base>-<layout>-<time>-<id>.bin.nct`
+
+The game lists every file in `Tracks/data/`. Each is a run of (u32 key hash, u32
+length, value). All 167 files have the same 123 keys in the same order, among them:
+
+| Key hash | Value |
+|----------|-------|
+| `0xf8197f89` | base name |
+| `0x16471b2a` | layout |
+| `0x13ed3c91` | time of day |
+| `0x9acfeddd` | id |
+| `0x99d35de4` | display name, which career events use |
+| `0xd4533915` | name key |
+| `0x9103eb0b` | location key |
+| `0xb8fb40ed` | folder (`Tracks/Laguna_Seca`) |
+| `0xb2172fc9` | country |
+
+Other keys hold the sky, music, cutscene and grid paths.
+
+`Tracks/data/ttk.dat.nct` is u32 1, u32 count, then (u32 id, md5 string): the md5 of
+the layout's collision mesh `.fmc` for each track id. Variants of a layout share one.
+
+**A new track** (`rr3track add`, Tools → New track) is a variant of one of the game's
+tracks:
+
+* a new id and name;
+* its ttk entry;
+* an entry in the career's track list;
+* its text;
+* optionally, its own copy of the donor's folder, whose models an OBJ / FBX can
+  replace by mesh name.
+
+The collision mesh, the AI line (`.rr_ai`, `.spline`) and the timing stay the donor's.
 
 ### Searching the tree
 
@@ -956,6 +1153,16 @@ tree is rebuilt once you stop, so it does not stutter on a large install.
   wheels go on locators 32 (front) and 34 (rear); the right ones are their mirror. User IDs 38-60
   draw from `texture_wheels_01`, 61-80 from `_02`, 81-99 from `texture_wheels_generic`, Shift 2's
   1100 and up from `_03`.
+  * Which rim a car wears is in `cars.bin`. Shift: per car 8 paint entries (23 bytes: `@GL`, four
+    ids, RGB, `000`), the rim's u16 30 bytes after them. Shift 2: 25-byte paint entries, the rim
+    49 bytes into the block after the group. Undercover: a u8 count, then 125-byte records, the
+    rim in column 28. The records do not name their car; the tool matched them by the paint
+    colours (against `texture_car_<car>_01..07`) and the rims' centre-cap logos, and keeps the
+    result as a table (`eaPhoneCarWheel`).
+* **Shift 2's extra parts:** an appearance holding only options 1001-1019 (wings) draws
+  `texture_spoilers.m3g`; one holding 1020-1029 (exhausts) draws
+  `texture_car_<car>_exhaust.m3g`, and the untagged (user ID 0) cards in that appearance are the
+  flame and heat effects, hidden in the viewer.
 * **Cockpit (Shift):** `cockpit_<car>.m3g`: 250 the dashboard card (`texture_cockpit_<car>`),
   251 the steering wheel (`texture_steeringwheel_<car>`), 100-199 windscreen cracks.
   `bonnet_<car>.m3g`: `texture_bonnet_<car>`. `Cockpit_HandL/R`: `texture_cockpit_arm_01`.
@@ -965,10 +1172,14 @@ tree is rebuilt once you stop, so it does not stutter on a large install.
   * Undercover (`<location>_<event>.bin`): u8 tile count, then per tile f32 x, f32 z (times 10
     in model units), u16 turn in degrees, u16 mirror (bit 0 mirrors x, bit 1 z), u8 0, u8 kind,
     u8 n, n × (u16 id, u16 piece). Other data follows the tiles.
-  * Shift (`chicago_0N.bin`) and Shift 2 (`locationc_0N.bin`): `00 FF 00 FF 00 FF`, u8 tile
-    count, then the same head (Shift 2 has two more bytes before n), n entries of 8 bytes (Shift
-    2: 9) with the piece at bytes 2-3, u8 m and m × 28 bytes, then 20 bytes (`01`, six u16
-    neighbours, three u16), u8 q and q × 8 bytes.
+  * Shift (`chicago_0N.bin`) and Shift 2 (`locationc_0N.bin`): six bytes (mostly
+    `00 FF 00 FF 00 FF`, but some of Shift 2's - `locationb_02`, `locationc_06`, the night tracks -
+    have other values there), u8 tile count, then the same head (Shift 2 has two more bytes
+    before n), n entries of 8 bytes (Shift 2: 9) with the piece at bytes 2-3, u8 m and m × 28
+    bytes, then 20 bytes (`01`, six u16 neighbours, three u16), u8 q and q × 8 bytes.
+  * The mirror's bit 1 is not a mirror in Shift 2: its tracks only join up when it is left out
+    (bit 0 still mirrors x). The tool lays a track out both ways and keeps the one whose road
+    pieces meet; Undercover's layouts come out the same either way.
 * **Shift 2 track textures:** `texturelist_<track>.bin` gives each appearance six bytes: u8
   kind, u8, a u16 texture number, two bytes. The number indexes a table the game fills while it
   reads every texture list in name order (lightmap lists included), giving each texture it has
@@ -1038,8 +1249,8 @@ fault can be found without guessing.
   yet, so they are written as `.bin`.
   [ImageHeat](https://github.com/bartlomiejduda/ImageHeat) can open those by
   entering the size by hand.
-* **ASTC / ATC / EAC** payloads are written out undecoded. PVRTC (2bpp and
-  4bpp), ETC1/ETC2, DXT1/3/5, PNG, JPEG and raw pixel formats are decoded.
+* **ASTC / EAC** payloads are written out undecoded. PVRTC (2bpp and
+  4bpp), ETC1/ETC2, DXT1/3/5, ATC, PNG, JPEG and raw pixel formats are decoded.
 * **The mesh-to-material pointer is not decoded.** Materials and their
   textures come from the file, but which mesh uses which is matched by name
   (see above).
@@ -1056,10 +1267,12 @@ fault can be found without guessing.
   with uneven nibbles it is a bit-packed codec of the game's own. Written out
   whole as `.gnsu`.
 * **Wwise Vorbis sounds need vgmstream** to become wav; see Audio above.
-* **`.nct` / `.gui` are decoded from a recovered pad, not a known key.** The
-  shipped pad covers 5781 bytes, and 1657 of them are certain. Finishing it
-  from your own game is a menu item. The livery entries after the texture
-  table are read as text; their full field layout is not mapped yet.
+* **Real Racing 3 additions are untested in the game.** New cars, series and
+  tracks are written to the formats above and read back byte for byte, but they
+  have not been loaded on a device. Unknown fields (most career event tuning,
+  the livery flags) are copied from the car, series or track a new one starts from.
+* **A new track keeps the donor's collision, AI line and timing.** Only its
+  models and textures can be your own.
 * **No Limits number plates:** the Cayenne's plate UVs, texture flip and
   handedness were each checked and are consistent. The A45 S plate that
   shows wrong has not been available here. Its `.sb3d` and plate texture are
@@ -1126,9 +1339,10 @@ src/nfsnl_image.cpp   .sba, PNG, JPEG, BMP, TGA, DDS, ETC + DXT decoding
 src/nfsnl_model.cpp   .sb3d decoding, FBX and OBJ writers
 src/nfsnl_m3g.cpp     No Limits .m3g: the DA BD wrapper and the general reader
 src/nfsnl_rr3.cpp     Real Racing 3: .z / .z.bin, .points, JSR-184 models,
-                      _shared.m3g wheels, the .nct / .gui pad and its learner
+                      _shared.m3g wheels, the .nct / .gui / text RC4
 src/nfsnl_jsr.cpp     standard JSR-184 scenes (NFS Undercover, Shift, Shift 2)
 src/nfsnl_lzham.cpp   the built-in LZHAM decoder (src/lzham/, public domain)
+src/nfsnl_lzma.cpp    LZMA decoder (the China build's FMOBB), the tool's own
 src/nfsnl_import.cpp  OBJ / FBX reading and the Real Racing 3 .m3g writer (car mods)
 src/nfsnl_data.cpp    data files as editable text and back (.sounddef, .evt, tables)
 src/nfsnl_render.cpp  the software renderer behind the 3D viewer
@@ -1143,10 +1357,48 @@ src/main_win32.cpp    Windows GUI
 src/main_cli.cpp      command line tool
 src/monkeytool.rc     icon, version info, visual-styles manifest
 src/monkeytool.ico    the monkey
-src/nct_pad.inc       the .nct / .gui pad the tool ships with
+src/nct_rc4.inc       Real Racing 3's RC4 start table and keys
+src/nfsnl_rr3car.cpp  Real Racing 3 car data: fields, reading and writing
+src/nfsnl_rr3add.cpp  Real Racing 3: liveries, the car lists, adding a car
+src/nfsnl_rr3career.cpp Real Racing 3 career (events.dat), text files, series and tracks
 src/nfsnl_save.cpp    the Save Editor's core: No Limits (AES, SBIN) and
                       Real Racing 3 saves
 src/win32_save_editor.cpp  the Save Editor window
 tools/SaveEditor/     the original Go source of the Save Editor, for reference
 ```
 
+
+
+## Real Racing 3: more of what the files hold (1.2.10)
+
+* **`suspensionbehaviour.suspensiondata`**: u32 1, u32 count, then 140 bytes a car: its id and 34
+  floats.
+  * Floats 22 and 23 (21 and 22 counted from 0) are the front and rear tyre diameters in metres.
+  * 911 GT3 RS: 0.710 / 0.720 (real tyres 0.694 / 0.728). Ferrari SF24: 0.719 / 0.748. Megane
+    Trophy R: 0.670.
+  * Floats 1 and 2 look like camber (-0.5 on the GT3 RS).
+  * The wheels of `<car>_shared.m3g` are scaled to these.
+* **`<car>_int_shadows.etc.dds.z.bin`**: a chain of frames (43 on the GT3 RS), each a 256x256
+  ETC1 sun-shadow mask on the cockpit's second UV set: lit white, shadowed black, one per sun
+  direction. Their mean is the cockpit's ambient occlusion.
+* **`<car>_ext_shadows_high`** (22 frames of 512x512) belongs to no body UVs: it is the shadow
+  on the ground.
+* **Cockpit trim slots** `_mm_mat00`..`mat07` are one scheme across the game:
+  * mat00 carbon fibre, mat01 leather, mat02 stitching (alpha), mat03 plastic leather, mat04
+    suede (the steering wheel rim), mat06 rubber or carpet, mat07 aluminium.
+  * Their first UVs tile (to +-15) over a detail texture from `common/`.
+  * A car's .liveries list names only the slots it recolours (the GT3 RS: `stitching_black_mat02`).
+* **The game's hardpoint names** (libRealRacing3.so): a table of 37 POINT_ names and 42 HINGE_
+  names.
+  * The .points loader reads a type-0 record as a position only (x, then y negated into z, z into
+    y). A type-2 record is position plus a 3x3 orientation.
+* **Car mods**: a car is the data file `vehicles/data/<id>_<folder>.bin.nct`, plus records keyed
+  by its id or folder:
+  * `cardesc.list`: `<id>_<folder>.bin`.
+  * `carappearances`: the record for the data's appearance index, naming the folder.
+  * `cardamagethresholds` (116 bytes) and `suspensionbehaviour` (140 bytes), keyed by id.
+  * Its name key's line in `gametext.txt` and the same line in each `text_<lang>.txt`.
+  * `vehicles/data/liveries/<folder>.liveries.bin.nct`.
+  * `vehicles/<folder>/`.
+  * Two mods for one slot need their records merged into the game's lists, one of them
+    renumbered; copying the lists over each other keeps only the last car.

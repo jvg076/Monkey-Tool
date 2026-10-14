@@ -1327,6 +1327,23 @@ std::string modelKits(const Model& m) {
     return k;
 }
 
+void nlAssignKits(Model& model) { assignKits(model); }
+
+int keepKit(Model& m, const std::string& kit) {
+    m.exportKit = kit.empty() ? std::string("all") : kit;
+    if (kit == "all" || kit.empty()) return 0;
+    std::vector<uint8_t> keep = kitMask(m, kit);
+    std::vector<Mesh> out;
+    out.reserve(m.meshes.size());
+    int removed = 0;
+    for (size_t i = 0; i < m.meshes.size(); ++i) {
+        if (keep[i]) out.push_back(std::move(m.meshes[i]));
+        else ++removed;
+    }
+    m.meshes.swap(out);
+    return removed;
+}
+
 std::vector<uint8_t> kitMask(const Model& m, const std::string& kit) {
     std::vector<uint8_t> show(m.meshes.size(), 1);
     if (kit == "all" || kit.empty()) return show;
@@ -1363,6 +1380,8 @@ std::vector<uint8_t> kitMask(const Model& m, const std::string& kit) {
     return show;
 }
 
+static const char* const kHelperMaterial = "MT_HELPER_not_drawn_in_game";
+
 // ================================================================ writers
 
 namespace {
@@ -1374,12 +1393,64 @@ void appendf(std::string& s, const char* fmt, ...) {
     va_end(ap);
     if (n > 0) s.append(buf, (size_t)std::min<int>(n, (int)sizeof(buf) - 1));
 }
+
+// The writers' hot loop: a number as "%.*f" writes it, without the trailing
+// zeros ("0", "0.5", "-1.25") and without a vsnprintf per number. The value
+// is the same to the last decimal; the file is a fifth smaller and written
+// several times faster.
+void appendNum(std::string& s, float value, int dec) {
+    static const long long kPow[] = { 1, 10, 100, 1000, 10000, 100000, 1000000 };
+    double v = value;
+    if (v != v) { s += '0'; return; }                       // NaN
+    if (dec < 0 || dec > 6 || v > 1e12 || v < -1e12) { appendf(s, "%.*f", dec < 0 ? 6 : dec, v); return; }
+    bool neg = v < 0;
+    if (neg) v = -v;
+    long long p = kPow[dec];
+    long long q = llround(v * (double)p);
+    if (q == 0) { s += '0'; return; }
+    char buf[48];
+    int n = 0;
+    if (neg) buf[n++] = '-';
+    long long ip = q / p, fp = q % p;
+    char ib[24];
+    int ni = 0;
+    do { ib[ni++] = (char)('0' + ip % 10); ip /= 10; } while (ip);
+    while (ni) buf[n++] = ib[--ni];
+    if (fp) {
+        char fr[8];
+        for (int i = dec - 1; i >= 0; --i) { fr[i] = (char)('0' + fp % 10); fp /= 10; }
+        int nf = dec;
+        while (nf && fr[nf - 1] == '0') --nf;
+        buf[n++] = '.';
+        memcpy(buf + n, fr, (size_t)nf);
+        n += nf;
+    }
+    s.append(buf, (size_t)n);
+}
+
+void appendInt(std::string& s, long long v) {
+    char buf[24];
+    int n = 0;
+    bool neg = v < 0;
+    unsigned long long u = neg ? 0ull - (unsigned long long)v : (unsigned long long)v;
+    do { buf[n++] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (neg) s += '-';
+    while (n) s += buf[--n];
+}
+
+// count numbers from a float array, comma separated
+void appendNums(std::string& s, const float* v, size_t count, int dec) {
+    for (size_t i = 0; i < count; ++i) {
+        if (i) s += ',';
+        appendNum(s, v[i], dec);
+    }
+}
 }
 
 std::string writeObjString(const Model& m) {
     std::string s;
     s.reserve(1 << 20);
-    s += "# exported by Monkey Tool 1.2.2\n";
+    s += "# exported by Monkey Tool 1.3.0\n";
     size_t baseV = 1;
     for (const Mesh& mesh : m.meshes) {
         // group by LOD so an OBJ viewer shows the same tree the FBX does
@@ -1393,30 +1464,43 @@ std::string writeObjString(const Model& m) {
         // alpha, so only RGB goes here; the FBX keeps all four channels.
         bool hasCol = mesh.colors.size() / 4 == nv && nv;
         for (size_t i = 0; i < nv; ++i) {
-            if (hasCol)
-                appendf(s, "v %.6f %.6f %.6f %.4f %.4f %.4f\n", mesh.positions[i*3],
-                        mesh.positions[i*3+1], mesh.positions[i*3+2],
-                        mesh.colors[i*4], mesh.colors[i*4+1], mesh.colors[i*4+2]);
-            else
-                appendf(s, "v %.6f %.6f %.6f\n", mesh.positions[i*3],
-                        mesh.positions[i*3+1], mesh.positions[i*3+2]);
+            s += "v ";
+            appendNum(s, mesh.positions[i*3], 6);     s += ' ';
+            appendNum(s, mesh.positions[i*3+1], 6);   s += ' ';
+            appendNum(s, mesh.positions[i*3+2], 6);
+            if (hasCol) {
+                for (int c = 0; c < 3; ++c) { s += ' '; appendNum(s, mesh.colors[i*4+c], 4); }
+            }
+            s += '\n';
         }
         bool hasUv = mesh.uvs.size() / 2 == nv;
         if (hasUv)
-            for (size_t i = 0; i < nv; ++i)
-                appendf(s, "vt %.6f %.6f\n", mesh.uvs[i*2], mesh.uvs[i*2+1]);
-        for (size_t i = 0; i < nv; ++i)
-            appendf(s, "vn %.6f %.6f %.6f\n", mesh.normals[i*3],
-                    mesh.normals[i*3+1], mesh.normals[i*3+2]);
+            for (size_t i = 0; i < nv; ++i) {
+                s += "vt ";
+                appendNum(s, mesh.uvs[i*2], 6);  s += ' ';
+                appendNum(s, mesh.uvs[i*2+1], 6); s += '\n';
+            }
+        bool hasN = mesh.normals.size() / 3 == nv;
+        if (hasN)
+            for (size_t i = 0; i < nv; ++i) {
+                s += "vn ";
+                appendNum(s, mesh.normals[i*3], 6);   s += ' ';
+                appendNum(s, mesh.normals[i*3+1], 6); s += ' ';
+                appendNum(s, mesh.normals[i*3+2], 6); s += '\n';
+            }
         for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
-            size_t a = baseV + mesh.indices[i];
-            size_t b = baseV + mesh.indices[i+1];
-            size_t c = baseV + mesh.indices[i+2];
-            if (hasUv)
-                appendf(s, "f %zu/%zu/%zu %zu/%zu/%zu %zu/%zu/%zu\n",
-                        a,a,a, b,b,b, c,c,c);
-            else
-                appendf(s, "f %zu//%zu %zu//%zu %zu//%zu\n", a,a, b,b, c,c);
+            s += 'f';
+            for (int k = 0; k < 3; ++k) {
+                long long a = (long long)(baseV + mesh.indices[i + k]);
+                s += ' ';
+                appendInt(s, a);                       // a, a/a, a//a or a/a/a
+                if (hasUv || hasN) {
+                    s += '/';
+                    if (hasUv) appendInt(s, a);
+                    if (hasN) { s += '/'; appendInt(s, a); }
+                }
+            }
+            s += '\n';
         }
         baseV += nv;
     }
@@ -1443,11 +1527,11 @@ std::string writeFbxString(const Model& m) {
     std::string s;
     s.reserve(1 << 22);
     s += "; FBX 7.3.0 project file\n"
-         "; Exported by Monkey Tool 1.2.2\n\n"
+         "; Exported by Monkey Tool 1.3.0\n\n"
          "FBXHeaderExtension:  {\n"
          "    FBXHeaderVersion: 1003\n"
          "    FBXVersion: 7300\n"
-         "    Creator: \"Monkey Tool 1.2.2 by GM25\"\n"
+         "    Creator: \"Monkey Tool 1.3.0 by GM25\"\n"
          "}\n"
          "GlobalSettings:  {\n"
          "    Version: 1000\n"
@@ -1462,8 +1546,47 @@ std::string writeFbxString(const Model& m) {
          "    }\n"
          "}\n\n";
 
-    // body kits other than stock come in hidden, so the car opens as it ships
-    std::vector<uint8_t> stock = kitMask(m, "stock");
+    // Body kits other than the one exported are left out of the file. Nothing
+    // is written hidden: 3ds Max reads FBX "Visibility 0" as an object you can
+    // select but never see (it looks like a mesh with no vertices), and
+    // Blender greys it out. Damage parts, helpers and the camera views come in
+    // visible, each under a null of its own (DAMAGE, HELPERS, BONNETCAM...)
+    // that hides them in one click.
+    {
+        std::vector<uint8_t> keep = kitMask(m, m.exportKit.empty() ? std::string("all") : m.exportKit);
+        if (std::find(keep.begin(), keep.end(), 0) != keep.end()) {
+            Model only = m;
+            only.meshes.clear();
+            for (size_t i = 0; i < m.meshes.size(); ++i) if (keep[i]) only.meshes.push_back(m.meshes[i]);
+            only.exportKit = "all";
+            return writeFbxString(only);
+        }
+    }
+    // No Limits' HELPERS - the decal-placement shell round the body, the
+    // collision boxes, the rain collider - are never drawn by the game. Written
+    // visible (1.2.8) they wrapped the car in solid shells; they go out hidden
+    // and on a see-through material of their own, so a tool that ignores the
+    // hidden flag still shows them as glass. Their geometry is untouched.
+    {
+        bool remap = false;
+        for (const Mesh& me : m.meshes)
+            if (me.lod == "HELPERS" && me.material != kHelperMaterial) remap = true;
+        if (remap) {
+            Model h = m;
+            for (Mesh& me : h.meshes) if (me.lod == "HELPERS") me.material = kHelperMaterial;
+            bool have = false;
+            for (const Material& mt : h.materials) if (mt.name == kHelperMaterial) have = true;
+            if (!have) {
+                Material mt;
+                mt.name = kHelperMaterial;
+                mt.alphaBlend = true;
+                mt.hasColor = true;
+                mt.color[0] = 0.35f; mt.color[1] = 0.75f; mt.color[2] = 1.0f; mt.color[3] = 0.15f;
+                h.materials.push_back(mt);
+            }
+            return writeFbxString(h);
+        }
+    }
 
     // Meshes are grouped under one null per LOD, so a viewer shows
     //   LOD00 -> its meshes,  LOD01 -> its meshes, ...
@@ -1553,17 +1676,18 @@ std::string writeFbxString(const Model& m) {
 
         appendf(s, "    Geometry: %lld, \"Geometry::%s\", \"Mesh\" {\n", ids[k].first, name.c_str());
         appendf(s, "        Vertices: *%zu {\n            a: ", nv * 3);
-        for (size_t i = 0; i < nv * 3; ++i) {
-            appendf(s, "%.6f", mesh.positions[i]);
-            if (i + 1 < nv * 3) s += ',';
-        }
+        appendNums(s, mesh.positions.data(), nv * 3, 6);
         s += "\n        }\n";
 
-        appendf(s, "        PolygonVertexIndex: *%zu {\n            a: ", mesh.indices.size());
-        for (size_t i = 0; i + 2 < mesh.indices.size() + 1 && i < mesh.indices.size(); i += 3) {
-            appendf(s, "%u,%u,%d", mesh.indices[i], mesh.indices[i+1],
-                    ~(int)mesh.indices[i+2]);
-            if (i + 3 < mesh.indices.size()) s += ',';
+        // whole triangles only: a stray index or two at the end would make
+        // the count disagree with the list and the importer drop the mesh
+        size_t nIdx = mesh.indices.size() / 3 * 3;
+        appendf(s, "        PolygonVertexIndex: *%zu {\n            a: ", nIdx);
+        for (size_t i = 0; i + 2 < nIdx + 1 && i < nIdx; i += 3) {
+            if (i) s += ',';
+            appendInt(s, mesh.indices[i]);     s += ',';
+            appendInt(s, mesh.indices[i+1]);   s += ',';
+            appendInt(s, ~(long long)mesh.indices[i+2]);
         }
         s += "\n        }\n        GeometryVersion: 124\n";
 
@@ -1573,10 +1697,7 @@ std::string writeFbxString(const Model& m) {
                  "            MappingInformationType: \"ByVertice\"\n"
                  "            ReferenceInformationType: \"Direct\"\n";
             appendf(s, "            Normals: *%zu {\n                a: ", nv * 3);
-            for (size_t i = 0; i < nv * 3; ++i) {
-                appendf(s, "%.6f", mesh.normals[i]);
-                if (i + 1 < nv * 3) s += ',';
-            }
+            appendNums(s, mesh.normals.data(), nv * 3, 6);
             s += "\n            }\n        }\n";
         }
         if (mesh.uvs.size() == nv * 2) {
@@ -1585,24 +1706,18 @@ std::string writeFbxString(const Model& m) {
                  "            MappingInformationType: \"ByVertice\"\n"
                  "            ReferenceInformationType: \"Direct\"\n";
             appendf(s, "            UV: *%zu {\n                a: ", nv * 2);
-            for (size_t i = 0; i < nv * 2; ++i) {
-                appendf(s, "%.6f", mesh.uvs[i]);
-                if (i + 1 < nv * 2) s += ',';
-            }
+            appendNums(s, mesh.uvs.data(), nv * 2, 6);
             s += "\n            }\n        }\n";
         }
 
         bool hasUv2 = nv && mesh.uvs2.size() == nv * 2;
         if (hasUv2) {
             s += "        LayerElementUV: 1 {\n            Version: 101\n"
-                 "            Name: \"LiveryUV\"\n"
+                 "            Name: \"UVChannel_2\"\n"
                  "            MappingInformationType: \"ByVertice\"\n"
                  "            ReferenceInformationType: \"Direct\"\n";
             appendf(s, "            UV: *%zu {\n                a: ", nv * 2);
-            for (size_t i = 0; i < nv * 2; ++i) {
-                appendf(s, "%.6f", mesh.uvs2[i]);
-                if (i + 1 < nv * 2) s += ',';
-            }
+            appendNums(s, mesh.uvs2.data(), nv * 2, 6);
             s += "\n            }\n        }\n";
         }
         bool hasCol = nv && mesh.colors.size() == nv * 4;
@@ -1612,10 +1727,7 @@ std::string writeFbxString(const Model& m) {
                  "            MappingInformationType: \"ByVertice\"\n"
                  "            ReferenceInformationType: \"Direct\"\n";
             appendf(s, "            Colors: *%zu {\n                a: ", nv * 4);
-            for (size_t i = 0; i < nv * 4; ++i) {
-                appendf(s, "%.4f", mesh.colors[i]);
-                if (i + 1 < nv * 4) s += ',';
-            }
+            appendNums(s, mesh.colors.data(), nv * 4, 4);
             s += "\n            }\n        }\n";
         }
 
@@ -1644,9 +1756,9 @@ std::string writeFbxString(const Model& m) {
         appendf(s, "    Model: %lld, \"Model::%s\", \"Mesh\" {\n", ids[k].second, name.c_str());
         s += "        Version: 232\n        Properties70:  {\n"
              "            P: \"DefaultAttributeIndex\", \"int\", \"Integer\", \"\",0\n";
-        // collision hulls and the decal shell come in hidden
-        if (mesh.lod == "HELPERS" || mesh.lod == "DAMAGE" || mesh.lod == "BONNETCAM" || mesh.lod == "INTCAM" || mesh.lod == "COP" || !stock[k])
-            s += "            P: \"Visibility\", \"Visibility\", \"\", \"A\",0\n";
+        if (mesh.lod == "HELPERS")      // never drawn by the game
+            s += "            P: \"Visibility\", \"Visibility\", \"\", \"A\",0\n"
+                 "            P: \"Primary Visibility\", \"bool\", \"\", \"\",0\n";
         s += "        }\n    }\n";
     }
 
@@ -1684,6 +1796,11 @@ std::string writeFbxString(const Model& m) {
             appendf(s, "    Model: %lld, \"Model::%s\", \"Null\" {\n", pointIds[k], name.c_str());
             s += "        Version: 232\n        Properties70:  {\n"
                  "            P: \"DefaultAttributeIndex\", \"int\", \"Integer\", \"\",0\n";
+            // drawn small: Blender shows an empty as a cross one unit across,
+            // which on a car a few units long is a forest of lines through
+            // the body. A hardpoint has no children, so its scale moves
+            // nothing; set it back to 1 before parenting a part to it.
+            s += "            P: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",0.05,0.05,0.05\n";
             appendf(s, "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",%.6f,%.6f,%.6f\n",
                     h.pos[0], h.pos[1], h.pos[2]);
             if (h.hinge) {
@@ -1743,7 +1860,11 @@ std::string writeFbxString(const Model& m) {
             s += "            P: \"EmissiveColor\", \"Color\", \"\", \"A\",1,1,1\n"
                  "            P: \"EmissiveFactor\", \"Number\", \"\", \"A\",1\n";
         }
-        if (x.alphaBlend)
+        if (x.name == kHelperMaterial)
+            s += "            P: \"TransparencyFactor\", \"Number\", \"\", \"A\",0.85\n"
+                 "            P: \"TransparentColor\", \"Color\", \"\", \"A\",1,1,1\n"
+                 "            P: \"Opacity\", \"double\", \"Number\", \"\",0.15\n";
+        else if (x.alphaBlend)
             s += "            P: \"TransparencyFactor\", \"Number\", \"\", \"A\",0.5\n"
                  "            P: \"TransparentColor\", \"Color\", \"\", \"A\",1,1,1\n";
         // the render states the name spells out, kept verbatim so an importer
@@ -1849,6 +1970,7 @@ std::string rr3PointsNameFor(const std::string& modelPath) {
 bool writeModel(const Model& m, const std::string& format, Bytes& out) {
     // a file of groups alone still exports: its groups become empties
     if ((!m.valid || m.meshes.empty()) && m.points.empty()) return false;
+    if (format == "glb") return writeGlb(m, out, nullptr);
     std::string s = (format == "obj") ? writeObjString(m) : writeFbxString(m);
     out.assign(s.begin(), s.end());
     return !out.empty();
@@ -1868,9 +1990,7 @@ bool convertSb3d(const uint8_t* data, size_t len, const std::string& format,
         std::vector<Hardpoint> pts = rr3ReadPoints(pointsData, pointsLen);
         if (!pts.empty()) rr3PlaceParts(m, pts);
     }
-    std::string s = (format == "obj") ? writeObjString(m) : writeFbxString(m);
-    out.assign(s.begin(), s.end());
-    return !out.empty();
+    return writeModel(m, format, out);
 }
 
 // ================================================================ top level
@@ -2059,8 +2179,8 @@ std::vector<std::string> formatsFor(const std::string& assetPath) {
     // No Limits' own .m3g still needs LZHAM, so text and raw are offered too -
     // an export that always produces something beats a dialog that only says
     // no. Real Racing 3's .m3g converts outright.
-    if (e == "m3g") return {"fbx", "obj", "png", "txt", "raw"};
-    if (e == "sb3d") return {"fbx", "obj", "txt", "raw"};
+    if (e == "m3g") return {"fbx", "obj", "glb", "png", "txt", "raw"};
+    if (e == "sb3d") return {"fbx", "obj", "glb", "txt", "raw"};
     if (e == "points") return {"txt", "raw"};
     // the decoded .bin is what a hex editor wants; the same XOR puts it back
     if (e == "nct") return {"txt", "bin", "raw"};
@@ -2071,7 +2191,7 @@ std::vector<std::string> formatsFor(const std::string& assetPath) {
         assetPath.find("lightprobes") == std::string::npos &&
         assetPath.find("exclusions") == std::string::npos &&
         assetPath.find("lightmaps") == std::string::npos)
-        return {"fbx", "obj", "txt", "raw"};
+        return {"fbx", "obj", "glb", "txt", "raw"};
     if (e == "sba" || e == "pvr" || e == "ktx" || e == "dds")
         return {"png", "jpg", "bmp", "tga", "dds", "raw"};
     if (e == "wem") return {"wav", "raw"};
@@ -2140,7 +2260,7 @@ bool convertAsset(const std::string& assetPath, const uint8_t* data, size_t len,
     // container of the same name.
     if (e == "m3g" && isJsr184(data, len) && format != "raw") {
         bool ok = convertSb3d(data, len, format, out, error, sidecar, sidecarLen);
-        if (usedExtension) *usedExtension = (format == "obj") ? "obj" : "fbx";
+        if (usedExtension) *usedExtension = (format == "obj" || format == "glb") ? format : "fbx";
         return ok;
     }
     // No Limits' own .m3g, once LZHAM has unpacked it, is IM4M3G - the Most
@@ -2248,7 +2368,7 @@ bool convertAsset(const std::string& assetPath, const uint8_t* data, size_t len,
         if (usedExtension) *usedExtension = (format == "obj") ? "obj" : "fbx";
         return ok;
     }
-    if (e == "sba" && (format == "fbx" || format == "obj") && isNlScene(data, len)) {
+    if (e == "sba" && (format == "fbx" || format == "obj" || format == "glb") && isNlScene(data, len)) {
         bool ok = convertSb3d(data, len, format, out, error, sidecar, sidecarLen);
         if (usedExtension) *usedExtension = format;
         return ok;

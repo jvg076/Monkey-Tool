@@ -554,13 +554,20 @@ bool Library::read(size_t entryIndex, Bytes& out, std::string* error) {
             out.clear();
             return brotliDecompress(packed.data(), packed.size(), e.length, out) && sized();
         };
+        // LZMA (No Limits' China build): a properties byte, then the dictionary size
+        auto tryLzma = [&]() {
+            out.clear();
+            return packed.size() > 5 && packed[0] < 225 && lzmaDecompress(packed.data(), packed.size(), e.length, out);
+        };
         uint32_t f = e.fmobbFlags;
+        if (f == 1 && packed.size() > 5 && packed[0] == 0x5D && tryLzma()) return true;
         if (f == 2 && tryLzham()) return true;
         if (f == 1 && tryDeflate()) return true;
         if ((f & 4) && tryBrotli()) return true;
         if (f != 2 && tryLzham()) return true;
         if (f != 1 && tryDeflate()) return true;
         if (!(f & 4) && tryBrotli()) return true;
+        if (tryLzma()) return true;
         if (error) {
             if (f == 2 && !lzhamAvailable())
                 *error = "this file is LZHAM-packed and the LZHAM decoder did not start";

@@ -1825,9 +1825,11 @@ bool decodeDdsContainer(const uint8_t* data, size_t len, Image& out) {
     if (!memcmp(fourcc, "DXT1", 4)) return decodeDxt(body, bodyLen, w, h, 1, out);
     if (!memcmp(fourcc, "DXT3", 4)) return decodeDxt(body, bodyLen, w, h, 3, out);
     if (!memcmp(fourcc, "DXT5", 4)) return decodeDxt(body, bodyLen, w, h, 5, out);
-    if (!memcmp(fourcc, "ATC ", 4) || !memcmp(fourcc, "ATCI", 4) ||
-        !memcmp(fourcc, "ATCA", 4))
-        return false;                      // ATITC: no decoder, say so upstream
+    // ATITC - Adreno (Qualcomm) builds of Real Racing 3: <name>.atc.dds.
+    // "ATC " is RGB, "ATCA" explicit alpha, "ATCI" interpolated alpha.
+    if (!memcmp(fourcc, "ATC ", 4)) return decodeAtc(body, bodyLen, w, h, 1, out);
+    if (!memcmp(fourcc, "ATCA", 4)) return decodeAtc(body, bodyLen, w, h, 3, out);
+    if (!memcmp(fourcc, "ATCI", 4)) return decodeAtc(body, bodyLen, w, h, 5, out);
 
     if (fourcc[0] == 0 && fourcc[1] == 0 && fourcc[2] == 0 && fourcc[3] == 0) {
         // Uncompressed. The header states a bit count and one mask per
@@ -1923,6 +1925,14 @@ std::vector<std::string> textureRefCandidates(const std::string& ref) {
         std::string stem = stripExtension(p);
         for (const char* e : { "sba", "pvr", "png", "dds", "ktx" })
             if (ext != e) out.push_back(stem + "." + e);
+    }
+    // No Limits' early builds (the China release) name a police car's livery
+    // texture_<car>.sba in the model and ship it as _diffuse_reflection(_gloss)
+    if (ext == "sba") {
+        std::string stem = stripExtension(p);
+        for (const char* suf : { "_diffuse_reflection", "_diffuse_reflection_gloss",
+                                 "_difffuse_reflection_gloss", "_diffuse" })
+            out.push_back(stem + suf + ".sba");
     }
     // Real Racing 1's cut-scene cars name a texture of their own that the
     // game does not ship: car_sedan_cutscene_ext_01 is car_sedan_ext_01

@@ -226,6 +226,8 @@ std::string detectGameFolder(const std::string& path, const std::vector<std::str
         { "realracing2", "real_racing_2" }, { "com.ea.games.r3_", "real_racing_3" },
         { "r3_row", "real_racing_3" }, { "r3_na", "real_racing_3" },
         { "nfs14vr", "nfs_no_limits_vr" },
+        // the China release (Tencent): com.tencent.tmgp.NFSNL, 极品飞车 无限狂飙
+        { "tmgp.nfsnl", "nfs_no_limits" }, { "\xe6\x97\xa0\xe9\x99\x90\xe7\x8b\x82\xe9\xa3\x99", "nfs_no_limits" },
         { "nfs14", "nfs_no_limits" }, { "nfs13", "nfs_most_wanted" },
         { "nfshp", "nfs_hot_pursuit" }, { "r3next", "real_racing_next" },
         { "nfs14vr", "nfs_no_limits_vr" }, { "eanfs", "nfs_edge" }, { "nfsedge", "nfs_edge" },
@@ -259,7 +261,7 @@ std::string detectGameFolder(const std::string& path, const std::vector<std::str
         if (n.compare(0, 4, "car_") == 0 && n.find(".m3g") != std::string::npos) ++rr2cars;
         if (n.find(".sba") != std::string::npos) ++sba;
         if (n.find(".pvr") != std::string::npos) ++pvr;
-        if (n.find(".etc.dds") != std::string::npos) ++etc;
+        if (n.find(".etc.dds") != std::string::npos || n.find(".atc.dds") != std::string::npos) ++etc;
         if (n.find("nfs13") != std::string::npos || n.find("main.") == 0) ++obb;
         if (n.find("texture_bonnet") != std::string::npos) ++imm3g;
     }

@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <array>
 #include <functional>
 
 #if defined(_WIN32) && !defined(__MINGW32__) && !defined(_MSC_VER)
@@ -85,6 +86,8 @@ std::vector<SbinChunk> sbinChunks(const uint8_t* data, size_t len);
 bool lz4DecompressBlock(const uint8_t* src, size_t n, size_t expected, Bytes& out);
 // Brotli (RFC 7932): NFS Edge's FMOBB archives pack their files with it
 bool brotliDecompress(const uint8_t* src, size_t n, size_t expected, Bytes& out);
+// LZMA "alone": properties byte, dictionary size, stream (No Limits China's FMOBB)
+bool lzmaDecompress(const uint8_t* src, size_t n, size_t outSize, Bytes& out);
 const SbinChunk* findChunk(const std::vector<SbinChunk>& chunks, const char* tag);
 std::vector<std::string> sbinNames(const std::vector<SbinChunk>& chunks);
 
@@ -412,6 +415,10 @@ struct Mesh {
     // mesh exported without it can look flat or wrongly coloured.
     std::vector<float> colors;
     std::vector<float> uvs2;        // second uv set (No Limits paint: livery layout)
+    // Baked light, one value per vertex in 0..1 (empty: none): Real Racing
+    // 3's cockpits, from their <car>_int_shadows maps (rr3BakeCockpitLight).
+    // Viewers multiply it in; it is not part of the file.
+    std::vector<float> light;
     std::vector<uint32_t> indices;  // triangle list
     std::string material;           // material name as the file spells it
     std::string texture;            // diffuse texture path, as stated in the file
@@ -434,6 +441,13 @@ struct Mesh {
     // where the group the mesh hangs from sits in the file (NFS Undercover /
     // Shift track pieces: a layout places the piece, not the file)
     float origin[3] = {0, 0, 0};
+    // A part placed on a hinge that states an orientation (Real Racing 3
+    // HINGE_STEERING_WHEEL): it was turned by placeRot about the file's
+    // origin and then moved by placeMove. Kept so an import can undo it
+    // exactly; a part only moved keeps placeRotated false.
+    bool placeRotated = false;
+    float placeRot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // row-major, applied as R * p
+    float placeMove[3] = {0, 0, 0};
 };
 
 // A material as the game describes it. The name encodes how the engine draws
@@ -489,6 +503,10 @@ struct Model {
     // textures the file carries inside it (an M3G track's atlases); a mesh
     // names one as "#img:<index>"
     std::vector<Image> images;
+    // the body kit an export shows: "all" (every part, all visible - the
+    // default, since most programs open hidden parts as if they were not
+    // there), "stock" or a kit letter (keepKit drops the other kits' parts)
+    std::string exportKit = "all";
     bool valid = false;
 };
 
@@ -535,7 +553,10 @@ struct EaPhoneFiles {
 std::vector<std::string> eaPhoneDress(Model& m, const std::string& stem, const EaPhoneFiles& files,
                                       const std::string& layout = std::string());
 std::vector<std::string> eaPhoneLayoutCandidates(const std::string& stem, const std::vector<std::string>& leaves);
-int eaPhoneAttachWheels(Model& car, const Model& wheels, const std::function<std::string(const std::string&)>& find);
+int eaPhoneAttachWheels(Model& car, const Model& wheels, const std::function<std::string(const std::string&)>& find,
+                        const std::string& carName = std::string(), int* uidOut = nullptr);
+// the rim (its user ID in wheels.m3g) a car of NFS Undercover / Shift / Shift 2 wears; -1 unknown
+int eaPhoneCarWheel(const std::string& carName);
 int eaPhoneOrganizeInterior(Model& m, const std::string& stem, const std::function<std::string(const std::string&)>& find);
 // an event's layout (<location>_<event>.bin) of a location's road pieces
 struct EaTile { float x = 0, z = 0; int rot = 0; int mirror = 0;   // bit 0 mirrors x, bit 1 z
@@ -581,6 +602,10 @@ bool rr3Unwrap(const std::string& name, const uint8_t* data, size_t len,
 // The .points sidecar: hardpoints in the file's own units, converted here into
 // the same space as the model's vertices.
 std::vector<Hardpoint> rr3ReadPoints(const uint8_t* data, size_t len);
+// Move one point of a Real Racing 2 / 3 .points file to `pos` (the model's
+// space, as rr3ReadPoints gives it), in place: every other byte stays as it
+// was. A spline's node is named as rr3ReadPoints names it (SPLINE_X.03).
+bool rr3PointsSetPosition(Bytes& file, const std::string& name, const float pos[3]);
 
 // ---- .nct, a car's data file ----
 // One fixed pad XORed over the whole file, the same pad for every car. The
@@ -605,6 +630,10 @@ bool nctPadLoad(const std::string& path);
 bool nctTransform(const uint8_t* data, size_t len, Bytes& out,
                   size_t* covered = nullptr);
 std::string nctText(const std::string& name, const uint8_t* data, size_t len);
+// gametext.txt / text_<language>.txt: their own RC4 stream (the same XOR
+// both ways). rr3TextIsPlain: already readable, nothing to undo.
+bool rr3TextTransform(const uint8_t* data, size_t len, Bytes& out);
+bool rr3TextIsPlain(const uint8_t* data, size_t len);
 // Encode an edited, decoded file back (the same XOR). `uncertain` counts the
 // offsets the pad is not certain of; `pastPad` the bytes beyond its end, which
 // are copied unchanged. False when some bytes could not be encoded.
@@ -620,6 +649,282 @@ struct NctLiveries {
     std::vector<Texture> textures;
 };
 NctLiveries nctReadLiveries(const uint8_t* plain, size_t len);
+
+// ---- Real Racing 3 car data: vehicles/data/<id>_<car>.bin.nct (nfsnl_rr3car.cpp) ----
+// The decoded file as its fields (4-byte numbers and length-prefixed strings)
+// and where the named ones sit.
+struct Rr3Car {
+    struct Tok { bool str = false; std::string s; uint8_t raw[4] = {0, 0, 0, 0}; };
+    bool ok = false;
+    std::string why;
+    Bytes original, plain, plainOriginal, tail;
+    std::vector<Tok> toks;
+    int gears = 0;
+    int iYear = -1, iMake = -1, iModel = -1, iClass = -1, iBlock = -1, iDrive = -1, iSteady = -1,
+        iAsp = -1, iPos = -1, iEngine = -1, iProfile = -1, iUnlock = -1, iPrice = -1, iMakeKey = -1, iNameKey = -1, iPr = -1;
+};
+struct Rr3CarField { std::string key, label, value; bool text = false; };
+bool rr3CarRead(const uint8_t* nct, size_t len, Rr3Car& car);
+std::vector<Rr3CarField> rr3CarFields(const Rr3Car& car);
+bool rr3CarSet(Rr3Car& car, const std::string& key, const std::string& value, std::string& why);
+// the engine sound (samples, idle, levels) of another car
+bool rr3CarCopySound(Rr3Car& car, const Rr3Car& from, std::string& why);
+Bytes rr3CarPlain(const Rr3Car& car);
+// Encoded back. Bytes that did not change keep the original's encoding; false
+// when a changed byte falls where the pad is not certain (`report` says so).
+bool rr3CarWrite(const Rr3Car& car, Bytes& out, std::string& report);
+
+// The car creator: a car of the game made over into another one - its
+// figures, engine sound, models and textures. It keeps the car's place (id,
+// folder and file names, liveries list), so the game finds it as before.
+struct Rr3CarJob {
+    std::string car;                                // the car taken over: its folder name
+    std::map<std::string, std::string> fields;      // rr3CarFields keys
+    Bytes soundFrom;                                // another car's data file, or empty
+    std::string modelPath, interiorPath;            // OBJ / FBX on disk
+    std::vector<std::string> pictures;              // PNG / JPG named after the car's textures
+    std::vector<struct Rr3NewLivery> liveries;      // more liveries, after the car's own
+};
+struct Rr3CarOutput { std::string path; Bytes data; std::string note; };
+// <id>_<car>.bin.nct among the game's files ("" when there is none)
+std::string rr3CarDataPathFor(const std::string& car, const std::vector<std::string>& assets);
+bool rr3CreateCar(const Rr3CarJob& job, const std::vector<std::string>& assets,
+                  const std::function<bool(const std::string&, Bytes&)>& readAsset,
+                  std::vector<Rr3CarOutput>& out, std::string& report);
+
+// ---- Real Racing 3: a new car in the game (nfsnl_rr3add.cpp) ----
+// vehicles/data/liveries/<folder>.liveries.bin, decoded: the texture slots
+// (ids into liveryStringTable.bin) and one record per livery.
+struct Rr3Livery {
+    std::string file;               // 01_<folder>.livery
+    std::string display;            // the name the game shows; "" for the colour's own
+    Bytes a;                        // 8 bytes, kept as they are
+    std::string swatch, logo;       // garage swatch / team logo pictures, often ""
+    uint8_t flag = 1;
+    std::string arms, driver;       // driver arm / suit textures, often ""
+    Bytes c;                        // 4 bytes, kept as they are
+    uint8_t rgb[3] = {0, 0, 0};     // the colour of the livery's button
+    std::vector<std::pair<uint32_t, std::string>> overrides;   // texture slot -> file
+    std::vector<std::pair<uint32_t, uint32_t>> materials;      // mesh -> material
+};
+struct Rr3Liveries {
+    bool ok = false;
+    std::string car;
+    std::vector<std::pair<uint32_t, std::string>> textures;
+    std::vector<std::pair<uint32_t, uint32_t>> materials;
+    std::vector<std::array<uint32_t, 3>> extra;
+    std::vector<Rr3Livery> liveries;
+};
+bool rr3LiveriesRead(const uint8_t* plain, size_t len, Rr3Liveries& out);
+Bytes rr3LiveriesWrite(const Rr3Liveries& L);
+// every length-prefixed string holding `from` gets `to` instead (prefixes fixed)
+size_t rr3RenameStrings(Bytes& b, const std::string& from, const std::string& to);
+
+// asset_list_base.txtCache.txt: what the game believes it has on disk
+struct Rr3AssetList {
+    bool ok = false;
+    uint32_t version = 4;
+    std::string header;                                         // the line before the entries
+    std::vector<std::pair<std::string, std::string>> entries;  // "/path", md5
+};
+bool rr3AssetListRead(const Bytes& raw, Rr3AssetList& L);
+Bytes rr3AssetListWrite(const Rr3AssetList& L);
+void rr3AssetListSet(Rr3AssetList& L, const std::string& rel, const std::string& md5, bool keepIfListed);
+
+// The game's cars as cardesc.list has them, with what their data says.
+struct Rr3CarInfo {
+    uint32_t id = 0, appearance = 0;
+    bool readable = false;
+    std::string folder, modelFolder, dataFile, make, model, year, makeKey, profile, cls, drive;   // modelFolder: vehicles/<it>/
+};
+std::vector<Rr3CarInfo> rr3ListCars(const std::vector<std::string>& assets,
+                                    const std::function<bool(const std::string&, Bytes&)>& read);
+
+struct Rr3NewLivery {
+    std::string name;               // shown in the game
+    uint8_t rgb[3] = {200, 200, 200};
+    std::string picture;            // PNG / JPG for the body, or ""
+    bool repaint = true;            // no picture: the donor's livery tinted to rgb
+    int from = -1;                  // which of the donor's liveries to start from
+};
+// A car added to the game with a new id: a donor car's files copied under the
+// new folder name, then made over with the user's figures, models, textures,
+// liveries and sound, and registered in every list the game reads.
+struct Rr3NewCarJob {
+    std::string donor;              // the donor's model folder (vehicles/<donor>/)
+    std::string folder;             // the new car's folder: 2024_make_model
+    uint32_t id = 0;                // 0: the next free id
+    std::string make, makeKey;      // shown make and CAR_MANUFACTURER_<x> of a brand in the game
+    std::string modelName;          // shown name
+    std::string nameKey;            // "" -> CAR_NAME_<MODEL>_<id>
+    std::string upgrades;           // upgrade / handling package ("" = the donor's)
+    std::string unlock;             // unlock condition; "" = bought at the dealer
+    std::map<std::string, std::string> fields;      // rr3CarFields keys
+    Bytes soundFrom;                // another car's data file, or empty
+    std::string modelPath, interiorPath;
+    bool allLods = true;            // build _b.._h from the model as well
+    std::vector<std::string> pictures;
+    std::vector<Rr3NewLivery> liveries;             // empty: the donor's, renamed
+    bool keepListedMd5 = true;      // changed files keep the checksum the asset list has
+};
+// More liveries for a car already in the game, after the ones it has.
+bool rr3AddLiveries(const std::string& carFolder, const std::vector<Rr3NewLivery>& liveries,
+                    const std::vector<std::string>& assets,
+                    const std::function<bool(const std::string&, Bytes&)>& read,
+                    std::vector<Rr3CarOutput>& out, std::string& report);
+// Outputs are relative to the game's depot folder (vehicles/..., gametext.txt).
+bool rr3AddCar(const Rr3NewCarJob& job, const std::vector<std::string>& assets,
+               const std::function<bool(const std::string&, Bytes&)>& read,
+               std::vector<Rr3CarOutput>& out, std::string& report);
+
+// ---- installing a car mod (nfsnl_rr3add.cpp) ----
+// A mod is a folder laid out like the game's (vehicles/<car>/...,
+// vehicles/data/<id>_<car>.bin.nct, gametext.txt ...). Its cars are merged
+// into the game's lists as they are now - a mod's own cardesc.list,
+// carappearances and the rest are never copied over the game's, which is what
+// made a second mod wipe out the first. A car whose slot (its id) another car
+// already has can go into a free slot instead.
+struct Rr3ModCar {
+    uint32_t id = 0;              // the slot the mod was made for
+    std::string folder;           // vehicles/<folder>/
+    std::string name;             // "2018 Porsche 911 GT3 RS"
+    std::string dataRel;          // vehicles/data/<id>_<folder>.bin.nct, in the mod
+    uint32_t installAs = 0;       // the slot it goes into (= id, or the free one offered)
+    std::string slotTakenBy;      // the game's car in that slot when it is not this one ("611_2024_bmw_m4")
+    std::string takenByName;      // that car's shown name
+    bool update = false;          // the game already has this car: its files are replaced, its slot kept
+};
+struct Rr3Mod {
+    std::vector<std::pair<std::string, std::string>> files;   // depot path -> file on disk
+    std::vector<Rr3ModCar> cars;
+    std::vector<std::string> replaces;   // the game's own files outside the cars the mod would overwrite
+};
+// every file under `folder`, by its path in the game's depot
+std::vector<std::pair<std::string, std::string>> rr3ModScanFolder(const std::string& folder);
+// what the mod adds and where it clashes with the game as it is now
+bool rr3ModRead(const std::vector<std::pair<std::string, std::string>>& files, Rr3Mod& mod,
+                const std::vector<std::string>& assets,
+                const std::function<bool(const std::string&, Bytes&)>& read, std::string& why);
+// the files to write: the cars' own, and the game's lists with the cars in
+// (each car at its installAs slot). replaceGameFiles: also the mod's other
+// files that would overwrite the game's (mod.replaces).
+bool rr3ModInstall(const Rr3Mod& mod, bool replaceGameFiles, const std::vector<std::string>& assets,
+                   const std::function<bool(const std::string&, Bytes&)>& read,
+                   std::vector<Rr3CarOutput>& out, std::string& report);
+
+// ---- Real Racing 3's career: data/events.dat (nfsnl_rr3career.cpp) ----
+// A record kept field by field: t is 'i' (i32), 'f' (f32, bits in u),
+// 'b' (a byte) or 's' (a string).
+struct Rr3Val { char t = 'i'; uint32_t u = 0; std::string s; };
+typedef std::vector<Rr3Val> Rr3Fields;
+struct Rr3Event {
+    Rr3Fields a, extra, b;             // the fields before / inside / after the optional block
+    uint8_t extraPresent = 0;
+    int32_t type() const;           // 0 elimination, 1 head to head, 2 cup, 4 endurance, 7 speed record ...
+    int32_t id() const;
+    const std::string& track() const;   // the track's display name
+    int32_t laps() const, fame() const, reward() const;
+};
+struct Rr3Tier {
+    Rr3Fields head;                    // name key, display key, index in series, tier id, series id, unlock, trophies, flag
+    std::vector<std::pair<int32_t, uint8_t>> cars;    // allowed car ids, flags
+    Rr3Fields banners;                 // sponsor, trackside banners x2
+    std::vector<Rr3Event> events;
+    int32_t id() const, seriesId() const, indexInSeries() const;
+};
+struct Rr3Series {
+    Rr3Fields head, tail;              // id, title key, type, description key / ..., completion reward, reward id ...
+    std::vector<std::pair<uint32_t, uint32_t>> curves[3];
+    std::vector<std::vector<Rr3Fields>> requirements;    // groups of (type, a, b, text)
+    int32_t id() const, type() const;
+    const std::string& titleKey() const;
+    const std::string& descKey() const;
+    const std::string& completionReward() const;
+};
+struct Rr3GroupNode {
+    int32_t type = 0;               // 0 / 1 pages of series, 2 a hub (kept as bytes)
+    Rr3Fields base, base2;             // name key, flavour key, ?, card image, logo, loading screen / locked msg + 5
+    std::vector<std::string> logos, packs;
+    std::vector<Rr3GroupNode> children;
+    std::vector<std::vector<int32_t>> pages;
+    Bytes type2;
+};
+struct Rr3SuperGroup { int32_t kind = 0; std::string name, card; std::vector<std::string> packs; std::vector<Rr3GroupNode> groups; };
+struct Rr3Career {
+    bool ok = false;
+    uint32_t version = 0;
+    Bytes scales, rest;
+    std::vector<Rr3Fields> tracks;     // display name, f32, bool
+    std::vector<Rr3Series> series;
+    std::vector<Rr3Tier> tiers;
+    std::vector<Rr3SuperGroup> superGroups;
+    uint32_t namePools = 0, grids = 0;
+    std::vector<std::string> gridNames;
+};
+bool rr3CareerRead(const uint8_t* plain, size_t len, Rr3Career& c, std::string& why);
+Bytes rr3CareerWrite(const Rr3Career& c);
+std::vector<std::string> rr3CareerTracks(const Rr3Career& c);
+struct Rr3CareerGroup { std::string path, key, card; int type = 0; size_t series = 0; Rr3GroupNode* node = nullptr; };
+std::vector<Rr3CareerGroup> rr3CareerGroups(Rr3Career& c);
+std::string rr3CareerGroupOf(const Rr3Career& c, int32_t seriesId);
+
+// gametext.txt and the language files, line by line: GAMETEXT_<key> on line n
+// of gametext.txt, its text on line n of each text_<language>.txt
+struct Rr3Texts {
+    struct File { std::string leaf; bool plainOnDisk = false, changed = false; std::vector<std::string> lines; };
+    std::vector<File> files;        // gametext.txt first
+    std::map<std::string, size_t> keyLine;
+    int english = -1;
+    Rr3Texts();
+    bool load(const std::vector<std::string>& assets, const std::function<bool(const std::string&, Bytes&)>& read);
+    std::string get(const std::string& key) const;          // English text, "" when none
+    void set(const std::string& key, const std::string& text);   // every language; a new key is appended
+    std::vector<std::pair<std::string, Bytes>> changedFiles() const;   // leaf name, file bytes
+};
+
+struct Rr3SeriesEvent { std::string track; int type = 2; int laps = 0; int fame = -1; int reward = -1; int tier = 0; };
+struct Rr3SeriesJob {
+    int32_t seriesId = -1;          // the series to edit; -1 for a new one
+    int32_t templateId = 0;         // a new series is laid out like this one
+    std::string title, description; // shown text ("" keeps it)
+    std::vector<int32_t> cars;      // allowed car ids (empty keeps them)
+    std::vector<Rr3SeriesEvent> events;   // the events (empty keeps them); tier says which tier
+    std::string completionReward;   // e.g. car:611, gold:50
+    std::string group;              // list it in this career group (STREAM_GROUP_...)
+    std::string newGroupTitle, newGroupFlavour, groupCard;   // or in a new group with its own card
+    std::string cardPicture;        // PNG / JPG for the new group's card
+};
+bool rr3SeriesApply(Rr3Career& c, Rr3Texts& texts, const Rr3SeriesJob& job, int32_t& seriesId, std::string& report);
+// The job on the game's files: events.dat.nct, the text files, the card's
+// atlas pages and the asset list, as depot-relative outputs.
+bool rr3SeriesBuild(const Rr3SeriesJob& job, const std::vector<std::string>& assets,
+                    const std::function<bool(const std::string&, Bytes&)>& read,
+                    std::vector<Rr3CarOutput>& out, std::string& report, int32_t* madeId = nullptr);
+// A picture as a new page of a sprite atlas: the atlas XML with the image
+// added, and the page file (sprites_<n>.rgb.pvr.z) to put beside it.
+bool rr3AtlasAddPicture(const std::string& atlasXml, const Image& picture, const std::string& imageName,
+                        std::string& newXml, Bytes& pageFile, std::string& pageLeaf, std::string& why);
+
+// ---- Real Racing 3 tracks: Tracks/data/<base>-<layout>-<time>-<id>.bin.nct ----
+struct Rr3TrackInfo { int id = 0; std::string file, name, folder, time, layout, country; };
+std::vector<Rr3TrackInfo> rr3ListTracks(const std::vector<std::string>& assets,
+                                        const std::function<bool(const std::string&, Bytes&)>& read);
+// A new track: a variant of one of the game's with a new id and name, listed
+// in ttk.dat (its collision checksum), the career's track list and the text
+// files. With newFolder the donor's Tracks/<folder> is copied for it, and an
+// OBJ / FBX replaces the copied models' meshes by name (the driving surface,
+// AI line and collision stay the donor's).
+struct Rr3NewTrackJob {
+    std::string donor;              // display name ("Laguna Seca") or data file name
+    std::string name;               // the new display name, unique
+    std::string location, country, timeLabel;   // "" keeps the donor's
+    std::string newFolder;          // "" shares the donor's models; else Tracks/<newFolder>
+    std::string modelPath;          // with newFolder: meshes by name
+    int id = 0;                     // 0: the next free
+};
+bool rr3AddTrack(const Rr3NewTrackJob& job, const std::vector<std::string>& assets,
+                 const std::function<bool(const std::string&, Bytes&)>& read,
+                 std::vector<Rr3CarOutput>& out, std::string& report);
 
 // A genuine JSR-184 / Firemint M3G model.
 bool isJsr184(const uint8_t* data, size_t len);
@@ -647,7 +952,14 @@ std::vector<std::string> soundDefSamples(const uint8_t* data, size_t len);
 Model readImportModel(const uint8_t* data, size_t len, const std::string& name);
 // Where the viewer put a mesh: its centre as the file has it, how far the
 // .points placement moved it, and its largest extent.
-struct MeshPlacement { float centre[3] = {0, 0, 0}, offset[3] = {0, 0, 0}; float size = 0; };
+struct MeshPlacement {
+    float centre[3] = {0, 0, 0}, offset[3] = {0, 0, 0};
+    float size = 0;
+    // a part the viewer turned as well as moved: p_placed = rot * p + move
+    bool rotated = false;
+    float rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    float move[3] = {0, 0, 0};
+};
 // A Real Racing 3 .m3g with the named meshes' geometry replaced by the
 // imported model's (and meshes the file lacks added, cloned from one of the
 // same material). `report` says what happened either way.
@@ -715,6 +1027,26 @@ void rr3PlaceParts(Model& m, const std::vector<Hardpoint>& points);
 // gearstick) across. rr3InteriorPointsNameFor gives that file's name.
 void rr3MergeCockpitPoints(std::vector<Hardpoint>& exterior, const std::vector<Hardpoint>& interior);
 std::string rr3InteriorPointsNameFor(const std::string& modelPath);
+// The outside model's steering wheel and the cockpit's are modelled round
+// different pivots (the 2018 911 GT3 RS: the cockpit's sits 4-12 cm behind
+// its point, the outside one in front of it), so the point alone puts the
+// outside wheel into the dashboard. rr3CockpitWheelCentre places the
+// cockpit's own wheel (<car>_int_a.m3g, rr3InteriorModelNameFor) on its
+// points and gives its centre; rr3AlignSteering moves the outside wheel, one
+// group per LOD, so it is centred there too. Returns the meshes moved.
+std::string rr3InteriorModelNameFor(const std::string& modelPath);
+// A cockpit's baked light. <car>_int_shadows.etc.dds.z.bin holds one sun
+// shadow mask per sun direction (43 frames on the 911 GT3 RS, lit white,
+// shadowed black) on the cockpit's second UV set; the mean of them all is how
+// much of the sky each point sees - ambient occlusion. Fills Mesh::light for
+// every cockpit mesh with a second UV set. Returns the meshes lit.
+int rr3BakeCockpitLight(Model& m, const uint8_t* shadowsBin, size_t len);
+// the car a Real Racing 3 model belongs to: 2018_porsche_911_gt2_rs from
+// ..._a.m3g, ..._int_a.m3g and ..._shared.m3g alike (lower case)
+std::string rr3CarNameFor(const std::string& modelPath, bool* interior = nullptr);
+bool rr3CockpitWheelCentre(const uint8_t* m3g, size_t len, const std::vector<Hardpoint>& cockpitPoints,
+                           float centre[3]);
+int rr3AlignSteering(Model& m, const float centre[3], float* shiftCm = nullptr);
 // The car's wheel corners: <car>_shared.m3g beside <car>_a.m3g ("" if none)
 std::string rr3SharedNameFor(const std::string& modelPath);
 
@@ -830,14 +1162,31 @@ bool rr1IsCar(const Model& m);
 void rr1OrganizeCar(Model& m, const std::vector<Hardpoint>& pts, const Rr1Car* car);
 // insetToPoint: the point is the wheel's outer face (Real Racing 1 / GTI),
 // so the wheel goes inward from it by its width; otherwise the hub is on it
+// tyreDiameter: the car's front and rear tyre diameters in metres, as the
+// game sizes the wheels (rr3TyreDiameters); null: estimated from the hub
+// height and the wheel arches.
 int rr3AttachWheels(Model& car, const Model& wheel,
-                    const std::vector<Hardpoint>& points, bool insetToPoint = false);
+                    const std::vector<Hardpoint>& points, bool insetToPoint = false,
+                    const float* tyreDiameter = nullptr);
+// vehicles/data/suspensionbehaviour.suspensiondata.nct, decoded: u32 1, u32
+// count, then 140 bytes a car - its id, then 34 floats. The 22nd and 23rd
+// are the front and rear tyre diameters in metres: 0.710 / 0.720 on the 911
+// GT3 RS (its real tyres: 0.694 / 0.728), 0.719 / 0.748 on the Ferrari SF24
+// (18-inch F1 tyres). False when the car is not in it.
+bool rr3TyreDiameters(const uint8_t* plain, size_t len, uint32_t carId, float out[2]);
+// the car id a model folder's data file carries: vehicles/data/<id>_<car>.bin.nct
+uint32_t rr3CarIdFromDataName(const std::string& leaf, const std::string& car);
 
 std::string writeObjString(const Model& m);
 
 // Write an already-assembled model - used when the caller has added parts of
 // its own, such as wheels pulled in from another file.
 bool writeModel(const Model& m, const std::string& format, Bytes& out);
+// glTF 2.0 binary (.glb): the FBX export's scene in one file. pngFor gives a
+// texture's PNG bytes to put inside (empty: the file links <name>.png beside
+// it instead). HELPERS are left out. note: what went in.
+bool writeGlb(const Model& m, Bytes& out, const std::function<Bytes(const std::string&)>& pngFor,
+              std::string* note = nullptr, const std::string& sceneName = "model");
 std::string writeFbxString(const Model& m);
 
 // Convert one model to "fbx" or "obj". When the game ships a .points sidecar
@@ -1032,6 +1381,10 @@ enum AlphaMode { ALPHA_OPAQUE = 0, ALPHA_CUTOUT = 1, ALPHA_BLEND = 2 };
 // one (No Limits: _opaque / _alpha), else from the texture's alpha and the
 // part's colour alpha. alphaScale: a constant opacity to multiply in.
 AlphaMode meshAlphaMode(const Mesh& mesh, const AlphaStats* tex, float* alphaScale);
+// how the viewers show the HELPERS level (collision hulls, decal shell):
+// a pale blue, mostly see-through - the colour the FBX export gives them too
+constexpr float kHelperAlpha = 0.28f;
+constexpr float kHelperColour[3] = { 0.35f, 0.75f, 1.0f };
 // Real Racing 3's material shaders are two lookup ramps each: fresnel_<x>
 // (reflection by viewing angle) and spec_<x> (highlight by N.H), 1024 x 1
 // .rgb.pvr files in shaders/. rr3ShaderFor says which one a part would use
@@ -1039,7 +1392,11 @@ AlphaMode meshAlphaMode(const Mesh& mesh, const AlphaStats* tex, float* alphaSca
 // Real Racing 3's); rr3ShaderMatcap bakes a pair into a sphere map that a
 // viewer adds on top of the textured part (GL_SPHERE_MAP texgen).
 std::string rr3ShaderFor(const Mesh& mesh);
-Image rr3ShaderMatcap(const Image* fresnel, const Image* spec, int size = 128);
+Image rr3ShaderMatcap(const Image* fresnel, const Image* spec, int size = 128, float strength = 1.0f);
+// How strongly a viewer adds a shader's ramps. The game weights them by each
+// material's gloss mask and the scene's light; added in full, spec_dash_matte
+// (up to 252 of 255 over a third of its range) washed every cockpit white.
+float rr3ShaderStrength(const std::string& shader);
 // Whether the view casts the model's shadow: shadow and floor on, and a model
 // the size of a car or a prop rather than a whole track.
 bool wantsShadow(const RenderView& view);
@@ -1055,9 +1412,14 @@ void frameModel(const Model& m, RenderView& view);
 
 // The kit letters a model has besides the stock 'a', sorted ("byz").
 std::string modelKits(const Model& m);
+// a mesh's body kit letter and slot from its name (No Limits)
+void nlAssignKits(Model& model);
 // One flag per mesh: drawn in `kit` ("stock", "all" or a letter). A slot the
 // chosen kit has no version of falls back to its stock version.
 std::vector<uint8_t> kitMask(const Model& m, const std::string& kit);
+// only the parts a body kit shows ("stock", a letter); "all" keeps everything.
+// Sets exportKit, so the export shows them all. Returns the parts removed.
+int keepKit(Model& m, const std::string& kit);
 
 // Draw the model into `out` (24-bit, top-down). `textures`, when given, holds
 // one decoded diffuse image per mesh - a null entry means flat shading for
@@ -1065,6 +1427,10 @@ std::vector<uint8_t> kitMask(const Model& m, const std::string& kit);
 void renderModel(const Model& model, const RenderView& view,
                  const std::vector<const Image*>* textures,
                  int width, int height, Image& out);
+// Where renderModel puts a point of the model on its picture: pixel x, y and
+// the depth (false when it is behind the camera).
+bool projectPoint(const RenderView& view, int width, int height, const float p[3],
+                  float& sx, float& sy, float& depth);
 
 // ------------------------------------------------------------- top level
 // What a given asset can be saved as; first entry is the default.

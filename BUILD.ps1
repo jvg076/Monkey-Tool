@@ -1,5 +1,5 @@
 # =====================================================================
-#  Monkey Tool 1.2.2 - automatic Windows build
+#  Monkey Tool 1.3.0 - automatic Windows build
 #
 #  You do NOT need Visual Studio, CMake or anything else installed.
 #  If no compiler is found this downloads w64devkit (a portable MinGW
@@ -43,7 +43,7 @@ public static extern bool SetConsoleMode(IntPtr h, uint m);
 } catch {}
 
 Say ""
-Say "  Monkey Tool 1.2.2 - build" "Cyan"
+Say "  Monkey Tool 1.3.0 - build" "Cyan"
 Say "  ========================"  "Cyan"
 Say ""
 
@@ -347,6 +347,10 @@ $core = @(
     "src\nfsnl_library.cpp"
     "src\nfsnl_profiles.cpp"
     "src\nfsnl_rr3.cpp"
+    "src\nfsnl_rr3car.cpp"
+    "src\nfsnl_rr3add.cpp"
+    "src\nfsnl_rr3career.cpp"
+    "src\nfsnl_gltf.cpp"
     "src\nfsnl_import.cpp"
     "src\nfsnl_data.cpp"
     "src\nfsnl_save.cpp"
@@ -357,6 +361,7 @@ $core = @(
     "src\nfsnl_scene.cpp"
     "src\nfsnl_astc.cpp"
     "src\nfsnl_brotli.cpp"
+    "src\nfsnl_lzma.cpp"
     "src\nfsnl_jsr.cpp"
     "src\nfsnl_lzham.cpp"
 )

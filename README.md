@@ -8,23 +8,39 @@ Monkey Tool reads the game files of:
 
 | Series | Games |
 |--------|-------|
-| Need for Speed | Undercover, Shift, Hot Pursuit, Shift 2 Unleashed, Most Wanted (2012, mobile), No Limits, No Limits VR, Edge |
+| Need for Speed | Undercover, Shift, Hot Pursuit, Shift 2 Unleashed, Most Wanted (2012, mobile), No Limits (including the China build), No Limits VR, Edge |
 | Real Racing | Real Racing Next, Real Racing 3, Real Racing 2, Real Racing, Real Racing GTI |
 
 It opens on a **game profile**: you pick the game and point it at that game's files, and the archives are indexed where they are. **Nothing is unpacked to disk.** An asset's bytes are read the moment you click it.
 
 ## Features
 
-* **3D viewer** with textures, LOD levels, body kits, paint colours (NFS Shift and Shift 2), wheels placed the way each game places them, and animations. Cars and whole tracks, including the iPhone games' city maps.
-* **Export**: models to **FBX / OBJ** (with textures), textures to **PNG / JPG / BMP / TGA / DDS**, sounds to **WAV**, data files to **text**.
+* **3D viewer** with textures, LOD levels, body kits, paint colours (NFS Shift and Shift 2), wheels placed the way each game places them (each NFS Undercover / Shift / Shift 2 car on its own rims), and animations. Cars and whole tracks, including the iPhone games' city maps.
+* **Export**: models to **FBX / OBJ** (with textures) or **glTF 2.0 .glb** (textures inside the file), textures to **PNG / JPG / BMP / TGA / DDS**, sounds to **WAV**, data files to **text**.
 * **Import**:
   * your own pictures back into the game's textures (`.sba`, `.pvr`, `.dds`, `.z`);
-  * OBJ / FBX models into Real Racing 3 cars, part by part, or as a whole **new car** built on an existing one.
+  * OBJ / FBX models into Real Racing 3 cars, part by part, or as a whole car built on an existing one.
 * **Car colours** for NFS No Limits: cars open in the colours the game gives them (body, rims, brake calipers, from the car's own setups), and any other setup of the car can be picked. Exports ask whether rims, calipers and body come out painted or in the textures' default colours.
 * **Rim paint** for NFS No Limits: paint a wheel texture in any of the game's own rim colours, or a colour of your own.
 * **Limited-time layers** on NFS No Limits tracks: the Halloween, Christmas and event decorations a region carries, switched on in the viewer and taken along on export.
 * **UI texture packs** (NFS No Limits `texturepacks/ui`): every picture of a pack saved under the game's own name.
 * **Save Editor** for NFS No Limits and Real Racing 3.
+* **Car creator** for Real Racing 3, in four simple steps: **add a new car** (its own id, beside
+  the game's cars), or change one of the game's cars and give it more liveries. You set:
+  * year, brand, class, drivetrain, performance, engine and price;
+  * the upgrade package, the liveries (names, colours, pictures) and the engine sound;
+  * the body and cockpit models, as OBJ / FBX built into .m3g, and the textures.
+* **Racing series** for Real Racing 3: edit the career's series (title, allowed cars, events
+  and tracks) or add new ones, in a career group or a new group with your own card picture.
+* **New track** for Real Racing 3: a variant of one of the game's tracks, with its own id, name
+  and place in the career, and optionally its own models.
+* **Car mod installer** for Real Racing 3: a mod's cars merged into the game's lists as they are,
+  so mods do not wipe each other out. A car made for a slot another car already has can go
+  into the next free slot.
+* **Points editor** for Real Racing 3: a car's lights, exhausts, wheels and hinges on its model.
+  Click one, move it, save.
+* **Real Racing 3 data decoded in full.** The game's RC4 is built in: every `.nct` / `.gui` file,
+  the career (`events.dat`) and the language files read and write exactly.
 * **Data editor**: Real Racing 3 data files (`.sounddef`, `.evt`, tables) as editable text.
 * **Video player** for the games' films (NFS Undercover's `.m4v`, Shift's `.mov`).
 * **Several assets at once**: Ctrl+click and Shift+click select rows as in Windows Explorer,
@@ -37,7 +53,7 @@ Changes are kept as *pending* until you press **Save**. The original file is kep
 models/cars/jaguar_xe_sv/jaguar_xe_sv.sb3d        ->  .fbx / .obj
 textures/cars/bmw_m3_e30_1992/..._alpha.sba       ->  .png / .jpg / .bmp / .tga / .dds
 audio/<bank>.bnk                                  ->  the sounds it holds, as .wav
-cars/1979_porsche_935/1979_porsche_935_a.m3g      ->  .fbx / .obj (Real Racing 3)
+cars/1979_porsche_935/1979_porsche_935_a.m3g      ->  .fbx / .obj / .glb (Real Racing 3)
 cars/1979_porsche_935/..._misc.etc.dds.z          ->  .png (Real Racing 3)
 vehicles/<car>/<car>.sb3d                         ->  .fbx / .obj (Real Racing Next)
 ```
@@ -144,18 +160,21 @@ The tool has its own code for DEFLATE, PNG (including Apple's iPhone PNGs), JPEG
    and play it. Saving the bank writes them all as `.wav` (see [Audio](docs/FORMATS.md#audio-bnk-and-wem) in the format notes).
    Data files are shown as text too.
 
-7. **File → Convert all shown to a folder...** does the whole list at once.
+7. **The funnel icon → Convert everything shown...** does the whole list at once.
    To write only some assets, **Ctrl+click** rows to add or remove them and **Shift+click** to
-   take a range, then right-click the selection or use **File → Export selected**.
+   take a range, then right-click the selection.
 
    A film (`.m4v`, `.mov`) plays in the viewer's place, with Play, Stop and a seek bar under it.
 
-8. **View** menu: filter to textures / models / sounds, and switch between
-   **Light** and **Dark** theme. The choice is remembered between runs; on
-   first launch it follows your Windows theme.
+8. **No menu bar: everything is an icon** above the preview, one row at one spacing, each with a
+   tooltip: open game, export, import, save, car creator, racing series, new track, install a car
+   mod, edit car points, Save Editor, encode .nct / .gui, **Show** (the funnel: all assets,
+   textures, 3D models or sounds) and **Options** (the gear: **Theme** Light / Dark,
+   vgmstream, LZHAM, About). The theme is remembered between runs; on first launch it follows
+   your Windows theme. Shortcuts: Ctrl+O open, Ctrl+S save, Ctrl+I import a picture, Ctrl+E Save
+   Editor, Ctrl+L show the file an asset is in (also on the tree's right-click menu).
 
-9. **Save Editor.** The floppy-disk button to the right of the search box,
-   **Tools → Save Editor**, or Ctrl+E opens the save editor in its own
+9. **Save Editor.** Its icon (the person with a pencil) or Ctrl+E opens the save editor in its own
    window, which you can keep open beside the tool. Pick the save folder (No
    Limits: `saves-encrypted`; Real Racing 3: `doc`; a parent folder works
    too) or drag it onto the window.

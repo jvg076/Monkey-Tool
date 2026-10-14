@@ -85,6 +85,7 @@ typedef unsigned long long ULONGLONG;
 #define ES_AUTOHSCROLL 0x0080
 #define ES_AUTOVSCROLL 0x0040
 #define ES_WANTRETURN 0x1000
+#define ES_NUMBER 0x2000
 #define ES_NOHIDESEL 0x0100
 #define EM_SETLIMITTEXT 0x00C5
 #define OUT_DEFAULT_PRECIS 0
@@ -92,6 +93,7 @@ typedef unsigned long long ULONGLONG;
 #define FIXED_PITCH 1
 #define FF_MODERN 0x30
 #define BS_AUTOCHECKBOX 0x0003
+#define BS_AUTORADIOBUTTON 0x0009
 #define BM_SETCHECK 0x00F1
 #define BM_GETCHECK 0x00F0
 #define BST_CHECKED 1
@@ -314,6 +316,7 @@ int GetWindowTextW(HWND, LPWSTR, int);
 UINT_PTR SetTimer(HWND, UINT_PTR, UINT, void*);
 BOOL KillTimer(HWND, UINT_PTR);
 BOOL IsWindowVisible(HWND);
+BOOL IsWindowEnabled(HWND);
 HWND SetCapture(HWND);
 BOOL ReleaseCapture();
 BOOL PtInRect(const RECT*, POINT);
@@ -327,6 +330,7 @@ HANDLE LoadImageW(HINSTANCE, LPCWSTR, UINT, int, int, UINT);
 DWORD GetModuleFileNameW(HMODULE, LPWSTR, DWORD);
 BOOL GetMenuBarInfo(HWND, LONG, LONG, PMENUBARINFO);
 BOOL GetWindowRect(HWND, RECT*);
+HWND GetDlgItem(HWND, int);
 BOOL OffsetRect(RECT*, int, int);
 int GetSystemMetrics(int);
 HMENU CreateMenu();
@@ -494,6 +498,12 @@ int GetWindowTextLengthW(HWND);
 #ifndef LB_SETCURSEL
 #define LB_SETCURSEL 0x0186
 #endif
+#ifndef LB_GETSEL
+#define LB_GETSEL 0x0187
+#define LB_SETSEL 0x0185
+#define LB_GETCOUNT 0x018B
+#define LBS_EXTENDEDSEL 0x0800
+#endif
 #ifndef LBN_SELCHANGE
 #define LBN_SELCHANGE 1
 #endif
@@ -629,6 +639,8 @@ BOOL GetCursorPos(POINT*);
 BOOL DestroyMenu(HMENU);
 BOOL TrackPopupMenu(HMENU, UINT, int, int, int, HWND, const void*);
 #define TPM_RETURNCMD 0x0100L
+#define TPM_LEFTALIGN 0x0000L
+#define TPM_TOPALIGN 0x0000L
 #define TPM_RIGHTBUTTON 0x0002L
 #ifndef IDNO
 #define IDNO 7
@@ -728,3 +740,53 @@ DWORD GetSysColor(int);
 #ifndef CB_GETCOUNT
 #define CB_GETCOUNT 0x0146
 #endif
+// the themed message box
+typedef intptr_t LONG_PTR;
+#ifndef GWLP_USERDATA
+#define GWLP_USERDATA (-21)
+#endif
+#define WM_NCCREATE 0x0081
+struct CREATESTRUCTW { void* lpCreateParams; HINSTANCE hInstance; HMENU hMenu; HWND hwndParent; int cy, cx, y, x; LONG style; LPCWSTR lpszName, lpszClass; DWORD dwExStyle; };
+LONG_PTR GetWindowLongPtrW(HWND, int);
+LONG_PTR SetWindowLongPtrW(HWND, int, LONG_PTR);
+#define DI_NORMAL 0x0003
+BOOL DrawIconEx(HDC, int, int, HICON, int, int, UINT, HBRUSH, UINT);
+struct WNDCLASSW { UINT style; WNDPROC lpfnWndProc; int cbClsExtra, cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; LPCWSTR lpszMenuName, lpszClassName; };
+unsigned short RegisterClassW(const WNDCLASSW*);
+HMODULE GetModuleHandleW(LPCWSTR);
+HICON LoadIcon(HINSTANCE, LPCWSTR);
+#define IDI_ERROR ((LPCWSTR)32513)
+#define IDI_QUESTION ((LPCWSTR)32514)
+#define IDI_WARNING ((LPCWSTR)32515)
+#define IDI_INFORMATION ((LPCWSTR)32516)
+BOOL MessageBeep(UINT);
+#define MB_OKCANCEL 0x00000001L
+#define MB_RETRYCANCEL 0x00000005L
+#define MB_DEFBUTTON2 0x00000100L
+#define MB_DEFBUTTON3 0x00000200L
+#ifndef IDOK
+#define IDOK 1
+#endif
+#define IDRETRY 4
+#define DT_CALCRECT 0x00000400
+#define SPI_GETWORKAREA 0x0030
+BOOL SystemParametersInfoW(UINT, UINT, void*, UINT);
+#define WS_EX_DLGMODALFRAME 0x00000001L
+BOOL AdjustWindowRectEx(RECT*, DWORD, BOOL, DWORD);
+BOOL IsChild(HWND, HWND);
+HWND SetActiveWindow(HWND);
+HWND GetFocus();
+#define MF_UNCHECKED 0x00000000L
+#ifndef MF_CHECKED
+#define MF_CHECKED 0x00000008L
+#endif
+DWORD CheckMenuItem(HMENU, UINT, UINT);
+#ifndef DT_RIGHT
+#define DT_RIGHT 0x00000002
+#endif
+// the points editor
+typedef struct HRGN__* HRGN;
+#define RGN_DIFF 4
+HRGN CreateRectRgnIndirect(const RECT*);
+int CombineRgn(HRGN, HRGN, HRGN, int);
+BOOL FillRgn(HDC, HRGN, HBRUSH);

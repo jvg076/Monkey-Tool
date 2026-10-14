@@ -141,3 +141,23 @@ typedef NMTVCUSTOMDRAW* LPNMTVCUSTOMDRAW;
 #define TreeView_GetChild(h,i) (HTREEITEM)SendMessageW((h), TVM_GETNEXTITEM, 4, (LPARAM)(i))
 #define TreeView_GetParent(h,i) (HTREEITEM)SendMessageW((h), TVM_GETNEXTITEM, 3, (LPARAM)(i))
 #endif
+
+// 1.2.4: the car creator's list view (used by explicit LVM_*W messages)
+#define ICC_LISTVIEW_CLASSES 0x1
+#define WC_LISTVIEWW L"SysListView32"
+#define LVS_REPORT 0x0001
+#define LVS_SINGLESEL 0x0004
+#define LVS_SHOWSELALWAYS 0x0008
+#define LVS_EX_GRIDLINES 0x00000001
+#define LVS_EX_FULLROWSELECT 0x00000020
+#define LVCF_WIDTH 0x0002
+#define LVCF_TEXT 0x0004
+#define LVIF_TEXT 0x0001
+#define LVNI_SELECTED 0x0002
+#define LVIS_FOCUSED 0x0001
+#define LVIS_SELECTED 0x0002
+struct LVITEMW { UINT mask; int iItem; int iSubItem; UINT state; UINT stateMask; LPWSTR pszText; int cchTextMax;
+                 int iImage; LPARAM lParam; int iIndent; int iGroupId; UINT cColumns; UINT* puColumns; int* piColFmt; int iGroup; };
+struct LVCOLUMNW { UINT mask; int fmt; int cx; LPWSTR pszText; int cchTextMax; int iSubItem; int iImage; int iOrder;
+                   int cxMin; int cxDefault; int cxIdeal; };
+struct NMLISTVIEW { NMHDR hdr; int iItem; int iSubItem; UINT uNewState; UINT uOldState; UINT uChanged; POINT ptAction; LPARAM lParam; };

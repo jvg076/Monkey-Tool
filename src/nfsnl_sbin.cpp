@@ -87,6 +87,19 @@ bool nlSbDecode(const std::string& fileName, const uint8_t* d, size_t n, Bytes& 
         if (how) *how = "encrypted ZBDS, but the gzip inside did not unpack";
         return false;
     }
+    // No Limits' early builds (the China release): "ZBIN" and the gzip
+    // stream straight after it, no size field
+    if (plain.size() >= 10 && !memcmp(plain.data(), "ZBIN", 4)) {
+        Bytes out;
+        if (inflateGzip(plain.data() + 4, plain.size() - 4, out) &&
+            out.size() >= 8 && !memcmp(out.data(), "SBIN", 4)) {
+            if (how) *how = "encrypted, ZBIN + gzip";
+            sbin.swap(out);
+            return true;
+        }
+        if (how) *how = "encrypted ZBIN, but the gzip inside did not unpack";
+        return false;
+    }
     if (how) *how = "decrypted, but what is inside is not SBIN";
     return false;
 }

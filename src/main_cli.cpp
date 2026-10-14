@@ -20,7 +20,7 @@ static int cliRr3Textures(nfsnl::Model& m, const std::string& modelPath, std::st
                           std::string* report) {
     using namespace nfsnl;
     if (!root.empty() && root.back() != '/' && root.back() != '\\') root += "/";
-    static const char* const kExt[] = { ".etc.dds", ".etc.dds.z", ".pvr", ".pvr.z", ".ptc.pvr.z",
+    static const char* const kExt[] = { ".etc.dds", ".etc.dds.z", ".atc.dds", ".atc.dds.z", ".pvr", ".pvr.z", ".ptc.pvr.z",
                                         ".dxt.dds", ".dxt.dds.z", ".dds", ".dds.z", ".png" };
     auto exists = [](const std::string& p) {
         FILE* f = fopen(p.c_str(), "rb");
@@ -96,9 +96,7 @@ static int cliRr3Textures(nfsnl::Model& m, const std::string& modelPath, std::st
     // the car's .liveries list, when it is beside the model or one folder up
     NctLiveries liv;
     bool haveLiv = false;
-    std::string car = lower(stripExtension(baseName(modelPath)));
-    if (car.size() > 2 && car[car.size() - 2] == '_') car.erase(car.size() - 2);
-    if (car.size() > 4 && car.compare(car.size() - 4, 4, "_int") == 0) car.erase(car.size() - 4);
+    std::string car = rr3CarNameFor(modelPath);
     for (const char* sub : { "", "../", "livery/" })
         for (const std::string& leaf : listDir(root + sub)) {
             if (haveLiv || lower(leaf).compare(0, car.size() + 9, car + ".liveries") != 0) continue;
@@ -108,7 +106,24 @@ static int cliRr3Textures(nfsnl::Model& m, const std::string& modelPath, std::st
                 haveLiv = liv.ok;
             }
         }
-    return rr3AssignTextures(m, modelPath, find, common, haveLiv ? &liv : nullptr, report);
+    int n = rr3AssignTextures(m, modelPath, find, common, haveLiv ? &liv : nullptr, report);
+    // a cockpit: its baked light, from <car>_int_shadows (all its frames)
+    bool cockpit = false;
+    for (const Mesh& me : m.meshes)
+        if (me.name.find("_INT_") != std::string::npos && !me.uvs2.empty()) { cockpit = true; break; }
+    if (cockpit)
+        for (const std::string& leaf : listDir(root)) {
+            std::string l = lower(leaf);
+            if (l.compare(0, car.size() + 12, car + "_int_shadows") != 0) continue;
+            Bytes raw;
+            int lit = readFile(root + leaf, raw) ? rr3BakeCockpitLight(m, raw.data(), raw.size()) : 0;
+            if (lit) {
+                m.warnings.push_back(std::to_string(lit) + " cockpit part(s) shaded from " + leaf +
+                                     " (the mean of its sun-shadow frames)");
+                break;
+            }
+        }
+    return n;
 }
 
 #ifdef _WIN32
@@ -212,8 +227,9 @@ static void usage() {
 "  nfsnl list    <gameFolder>\n"
 "  nfsnl extract <gameFolder> <outFolder>              raw .sba/.sb3d/.wem\n"
 "  nfsnl convert <gameFolder> <outFolder> [opts]       converted assets\n"
-"  nfsnl one     <assetFile>  <outFile>   --format F   convert a single file\n"
-"                (a No Limits car also takes --wheel wheel_<car>.sb3d)\n"
+"  nfsnl one     <assetFile>  <outFile>   --format F   convert a single file (models: fbx, obj, glb)\n"
+"                (a No Limits car also takes --wheel wheel_<car>.sb3d and\n"
+"                 --kit stock|all|b|c... for one body kit, or every part shown)\n"
 "  nfsnl render  <modelFile>  <outPng>    [opts]       viewer frame to PNG\n"
 "  nfsnl browse  <gameFolder> [filter]                 index only, no unpacking\n"
 "  nfsnl where   <gameFolder> <name>                   which .pack an asset is in\n"
@@ -221,6 +237,32 @@ static void usage() {
 "                (.sba, .pvr, .dds, .z - same size, codec and mip levels)\n"
 "  nfsnl import  <car.m3g> <model.obj|fbx> <out.m3g>   Real Racing 3: meshes by name\n"
 "  nfsnl newcar  <template.m3g> <model.obj|fbx> <out.m3g>  Real Racing 3: a whole new car\n"
+           "  nfsnl rr3car  show <data.nct>                       Real Racing 3: a car's data fields\n"
+           "  nfsnl rr3car  set <data.nct> <out.nct> key=value ... [--sound <car.nct>]\n"
+           "  nfsnl rr3car  build <gameFolder> <car> <outFolder> key=value ... [--sound <car.nct>] [--livery \"Name:RRGGBB[:pic]\"]\n"
+           "                [--model ext.fbx] [--interior int.fbx] [--textures <folder of PNGs>]\n"
+           "                Real Racing 3: a car of the game made over into yours\n"
+           "  nfsnl rr3car  list <gameFolder>                      every car: id, folder, make, model, upgrade package\n"
+           "  nfsnl rr3car  add <gameFolder> <donorFolder> <outFolder> folder=<2024_make_model> [name=<shown name>]\n"
+           "                [make=<shown make>] [make_key=CAR_MANUFACTURER_X] [upgrades=<package>] [id=<n>] key=value ...\n"
+           "                [--model ext.fbx] [--interior int.fbx] [--textures <folder>] [--sound <car.nct>] [--only-lod-a]\n"
+           "                [--livery \"Name:RRGGBB[:picture.png]\"] ... [--update-md5]\n"
+           "  nfsnl rr3series list|groups|tracks <gameFolder>      Real Racing 3 career: series, menu groups, track names\n"
+           "  nfsnl rr3series show <gameFolder> <seriesId>         a series' tiers, allowed cars and events\n"
+           "  nfsnl rr3series add <gameFolder> <outFolder> template=<id> title=\"..\" [desc=\"..\"] cars=611,106\n"
+           "                event=\"Track name:type:laps[:tier]\" ... [group=STREAM_GROUP_X | newgroup=\"Title\" card=pic.png]\n"
+           "                [reward=car:611]\n"
+           "  nfsnl rr3series edit <gameFolder> <outFolder> id=<id> [title=..] [desc=..] [cars=..] [event=..] [group=..]\n"
+           "  nfsnl rr3track list <gameFolder>                     Real Racing 3 tracks: id, name, folder\n"
+           "  nfsnl rr3track add <gameFolder> <outFolder> donor=\"Laguna Seca\" name=\"My Track\" [location=..]\n"
+           "                [country=..] [time=..] [folder=<NewFolder> [model=track.fbx]] [id=<n>]\n"
+           "  nfsnl rr3points list <file.points>                   Real Racing 3 hardpoints (lights, exhausts, wheels ...)\n"
+"  nfsnl rr3points set <in.points> <out.points> NAME=x,y,z ...   move points; every other byte kept\n"
+"  nfsnl rr3mod  show <gameFolder> <modFolder>          Real Racing 3 car mod: its cars, and slots already taken\n"
+"  nfsnl rr3mod  install <gameFolder> <modFolder> <outFolder> [--free-slot] [--replace-game-files]\n"
+"                merged into the game's lists as they are; --free-slot moves a car whose slot is taken\n"
+"  nfsnl rr3     check <gameFolder>                     every car, liveries list and the career read and written back\n"
+           "  nfsnl rr3     decode|encode <in> <out>              .nct / .gui / text_*.txt / gametext.txt in or out of the game's RC4\n"
 "  nfsnl data    to <file> <out.txt>                  a data file as editable text\n"
 "  nfsnl data    from <file> <in.txt> <outFile>       and the edited text back\n"
 "  nfsnl sb      decode <file.sb> <out.sbin>           No Limits .sb -> SBIN\n"
@@ -238,7 +280,10 @@ static void usage() {
 "  --size W H            image size            (default 960 540)\n"
 "  --yaw D --pitch D     camera angles, degrees\n"
 "  --pos X Y Z           move the model\n"
+"  --centre X Y Z        orbit this point instead of the model (a close look, e.g. a cockpit)\n"
+"  --dist D              camera distance from the orbit point\n"
 "  --lod LOD00           draw one LOD only\n"
+"  --only NAME / --hide NAME   draw only / leave out the parts whose name has NAME\n"
 "  --kit stock|all|y     No Limits body kit: stock (default), all, or a letter\n"
 "  --tex <folder>        textures root, for textured shading\n"
 "  --setup <setup.sb>    No Limits: paint the car as this car setup does\n"
@@ -247,9 +292,61 @@ static void usage() {
 "\n"
 "Options for convert:\n"
 "  --tex  png|jpg|bmp|tga|dds|raw     texture output  (default png)\n"
-"  --mdl  fbx|obj                     model output    (default fbx)\n"
+"  --mdl  fbx|obj|glb                 model output    (default fbx)\n"
 "  --only textures|models|sounds      limit what is written\n"
 "\n");
+}
+
+// FBX / OBJ, or a .glb with the textures beside the model inside it
+static bool cliWriteModel(const Model& m, const std::string& fmt, Bytes& out, const std::string& modelPath) {
+    if (fmt != "glb") return writeModel(m, fmt, out);
+    std::string dir = modelPath.substr(0, modelPath.find_last_of("/\\") + 1);
+    std::string note;
+    bool ok = writeGlb(m, out, [&](const std::string& ref) -> Bytes {
+        Bytes raw, inner;
+        std::string path = ref;
+        if (!readFile(path, raw) && !readFile(dir + ref, raw)) return Bytes();
+        if (rr3IsContainer(ref, raw.data(), raw.size()) && rr3Unwrap(ref, raw.data(), raw.size(), inner, nullptr, nullptr))
+            raw.swap(inner);
+        Image img;
+        if (!decodeTextureFile(raw.data(), raw.size(), img)) return Bytes();
+        return encodePng(img);
+    }, &note, stripExtension(baseName(modelPath)));
+    if (ok) printf("  glb: %s\n", note.c_str());
+    return ok;
+}
+
+// the car's tyre diameters from vehicles/data (beside the car's folder)
+static bool cliTyreDiameters(const std::string& modelPath, float out[2]) {
+    std::string car = rr3CarNameFor(modelPath);
+    std::string dir = modelPath.substr(0, modelPath.find_last_of("/\\") + 1);
+    if (dir.empty()) dir = "./";
+    for (const char* sub : { "../data/", "../../vehicles/data/", "data/" }) {
+        std::string d = dir + sub;
+        uint32_t id = 0;
+        std::error_code ec;
+        for (auto& e : std::filesystem::directory_iterator(d, ec))
+            if (!id) id = rr3CarIdFromDataName(e.path().filename().string(), car);
+        Bytes raw, plain;
+        if (!id || !readFile(d + "suspensionbehaviour.suspensiondata.nct", raw)) continue;
+        if (!nctTransform(raw.data(), raw.size(), plain, nullptr)) plain = raw;
+        if (rr3TyreDiameters(plain.data(), plain.size(), id, out)) return true;
+    }
+    return false;
+}
+
+// the outside wheel centred where the cockpit's own wheel sits
+static void cliAlignSteering(Model& m, const std::string& modelPath, const Bytes& innerPoints, bool say) {
+    if (innerPoints.empty()) return;
+    Bytes cockpit;
+    std::string name = rr3InteriorModelNameFor(modelPath);
+    if (name.empty() || !readFile(name, cockpit)) return;
+    float centre[3];
+    if (!rr3CockpitWheelCentre(cockpit.data(), cockpit.size(),
+                               rr3ReadPoints(innerPoints.data(), innerPoints.size()), centre)) return;
+    float cm = 0;
+    int n = rr3AlignSteering(m, centre, &cm);
+    if (n && say) printf("  steering wheel lined up with the one in %s (moved %.1f cm)\n", baseName(name).c_str(), cm);
 }
 
 int main(int argc, char** argv) {
@@ -276,7 +373,7 @@ int main(int argc, char** argv) {
                 std::string innerPath = rr3InteriorPointsNameFor(tex);
                 if (!hp.empty() && !innerPath.empty() && readFile(innerPath, inner))
                     rr3MergeCockpitPoints(hp, rr3ReadPoints(inner.data(), inner.size()));
-                if (!hp.empty()) rr3PlaceParts(placed, hp);
+                if (!hp.empty()) { rr3PlaceParts(placed, hp); cliAlignSteering(placed, tex, inner, false); }
             }
             Bytes result;
             std::string report;
@@ -312,6 +409,471 @@ int main(int argc, char** argv) {
         if (wrapped) result = rr3WrapZ(result);
         if (!writeFile(outPath, result)) { printf("cannot write %s\n", outPath.c_str()); return 1; }
         printf("%s\nwrote %s (%zu bytes)\n", report.c_str(), outPath.c_str(), result.size());
+        return 0;
+    }
+    // "Name:RRGGBB[:picture]" for --livery
+    auto parseLivery = [](const std::string& v) {
+        Rr3NewLivery L;
+        size_t c1 = v.find(':');
+        L.name = v.substr(0, c1);
+        if (c1 != std::string::npos) {
+            size_t c2 = v.find(':', c1 + 1);
+            std::string hex = v.substr(c1 + 1, c2 == std::string::npos ? std::string::npos : c2 - c1 - 1);
+            if (!hex.empty() && hex[0] == '#') hex = hex.substr(1);
+            unsigned long rgb = strtoul(hex.c_str(), nullptr, 16);
+            L.rgb[0] = (uint8_t)(rgb >> 16); L.rgb[1] = (uint8_t)(rgb >> 8); L.rgb[2] = (uint8_t)rgb;
+            if (c2 != std::string::npos) L.picture = v.substr(c2 + 1);
+        }
+        return L;
+    };
+    // Real Racing 3 car mods: what a mod folder adds, and installing it
+    //   rr3mod show <gameFolder> <modFolder>
+    //   rr3mod install <gameFolder> <modFolder> <outFolder> [--free-slot] [--replace-game-files]
+    // Real Racing 3 hardpoints: list them, or move some
+    //   rr3points list <file.points>
+    //   rr3points set <in.points> <out.points> NAME=x,y,z ...
+    if (cmd == "rr3points" && argc >= 4) {
+        Bytes b;
+        if (!readFile(argv[3], b)) { printf("cannot read %s\n", argv[3]); return 1; }
+        if (!strcmp(argv[2], "list")) {
+            for (const Hardpoint& h : rr3ReadPoints(b.data(), b.size()))
+                printf("%-36s %9.4f %9.4f %9.4f%s\n", h.name.c_str(), h.pos[0], h.pos[1], h.pos[2], h.hinge ? "  (hinge)" : "");
+            return 0;
+        }
+        if (!strcmp(argv[2], "set") && argc >= 6) {
+            for (int k = 5; k < argc; ++k) {
+                std::string a = argv[k];
+                size_t eq = a.find('=');
+                float v[3];
+                if (eq == std::string::npos || sscanf(a.c_str() + eq + 1, "%f,%f,%f", &v[0], &v[1], &v[2]) != 3) {
+                    printf("give NAME=x,y,z: %s\n", a.c_str());
+                    return 1;
+                }
+                if (!rr3PointsSetPosition(b, a.substr(0, eq), v)) { printf("no point %s\n", a.substr(0, eq).c_str()); return 1; }
+            }
+            if (!writeFile(argv[4], b)) { printf("cannot write %s\n", argv[4]); return 1; }
+            printf("wrote %s\n", argv[4]);
+            return 0;
+        }
+    }
+
+    if (cmd == "rr3mod" && argc >= 5) {
+        std::string how = argv[2];
+        std::vector<std::pair<std::string, std::string>> gfiles;
+        scanLoose(argv[3], "", gfiles);
+        std::vector<std::string> assets;
+        std::map<std::string, std::string> full;
+        for (auto& f : gfiles) { assets.push_back(f.second); full[f.second] = f.first; }
+        auto read = [&](const std::string& p, Bytes& b) {
+            auto it = full.find(p);
+            return it != full.end() && readFile(it->second, b);
+        };
+        Rr3Mod mod;
+        std::string why;
+        if (!rr3ModRead(rr3ModScanFolder(argv[4]), mod, assets, read, why)) { printf("%s\n", why.c_str()); return 1; }
+        bool clash = false;
+        for (const Rr3ModCar& c : mod.cars) {
+            printf("car %u %-40s %s", c.id, c.folder.c_str(), c.name.c_str());
+            if (c.update) printf("  - already in the game: updated in its slot %u", c.installAs);
+            else if (!c.slotTakenBy.empty()) {
+                printf("  - slot %u is taken by %s%s%s; the next free slot is %u", c.id, c.slotTakenBy.c_str(),
+                       c.takenByName.empty() ? "" : " (", c.takenByName.empty() ? "" : (c.takenByName + ")").c_str(), c.installAs);
+                clash = true;
+            }
+            printf("\n");
+        }
+        for (const std::string& r : mod.replaces) printf("replaces the game's %s\n", r.c_str());
+        if (how == "show") return 0;
+        if (how != "install" || argc < 6) { usage(); return 1; }
+        bool freeSlot = false, replace = false;
+        for (int k = 6; k < argc; ++k) {
+            if (!strcmp(argv[k], "--free-slot")) freeSlot = true;
+            if (!strcmp(argv[k], "--replace-game-files")) replace = true;
+        }
+        if (clash && !freeSlot) {
+            printf("not installed: a slot is taken (installing over it would remove that car). "
+                   "Add --free-slot to put the car in the next free slot.\n");
+            return 1;
+        }
+        std::vector<Rr3CarOutput> outs;
+        std::string report;
+        bool ok = rr3ModInstall(mod, replace, assets, read, outs, report);
+        printf("%s", report.c_str());
+        if (!ok) return 1;
+        std::string outDir = argv[5];
+        for (const Rr3CarOutput& o : outs) {
+            std::string path = outDir + "/" + o.path;
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+            if (!writeFile(path, o.data)) { printf("cannot write %s\n", path.c_str()); return 1; }
+        }
+        printf("wrote %zu file(s) to %s\n", outs.size(), outDir.c_str());
+        return 0;
+    }
+
+    if (cmd == "rr3car") {
+        // Real Racing 3 car data: show its fields, or set some and write it back
+        //   rr3car show <data.nct>
+        //   rr3car set <data.nct> <out.nct> key=value ... [--sound <other car's data.nct>]
+        if (argc < 4) { usage(); return 1; }
+        std::string how = argv[2];
+        auto loadGame = [&](const std::string& game, std::vector<std::string>& assets, std::map<std::string, std::string>& full) {
+            std::vector<std::pair<std::string, std::string>> files;
+            scanLoose(game, "", files);
+            for (auto& f : files) { assets.push_back(f.second); full[f.second] = f.first; }
+        };
+        if (how == "list") {
+            std::vector<std::string> assets;
+            std::map<std::string, std::string> full;
+            loadGame(argv[3], assets, full);
+            auto cars = rr3ListCars(assets, [&](const std::string& p, Bytes& b) {
+                auto it = full.find(p);
+                return it != full.end() && readFile(it->second, b);
+            });
+            for (const Rr3CarInfo& c : cars)
+                printf("%4u  %-44s %-14s %-28s %-10s %-4s %s\n", c.id, c.modelFolder.c_str(), c.make.c_str(), c.model.c_str(),
+                       c.cls.c_str(), c.drive.c_str(), c.profile.c_str());
+            printf("%zu car(s)\n", cars.size());
+            return 0;
+        }
+        if (how == "add" && argc >= 6) {
+            std::vector<std::string> assets;
+            std::map<std::string, std::string> full;
+            loadGame(argv[3], assets, full);
+            std::string outDir = argv[5];
+            Rr3NewCarJob job;
+            job.donor = argv[4];
+            for (int k = 6; k < argc; ++k) {
+                std::string a = argv[k];
+                if (a == "--sound" && k + 1 < argc) { if (!readFile(argv[++k], job.soundFrom)) { printf("cannot read %s\n", argv[k]); return 1; } continue; }
+                if (a == "--model" && k + 1 < argc) { job.modelPath = argv[++k]; continue; }
+                if (a == "--interior" && k + 1 < argc) { job.interiorPath = argv[++k]; continue; }
+                if (a == "--only-lod-a") { job.allLods = false; continue; }
+                if (a == "--update-md5") { job.keepListedMd5 = false; continue; }
+                if (a == "--textures" && k + 1 < argc) {
+                    std::vector<std::pair<std::string, std::string>> pics;
+                    scanLoose(argv[++k], "", pics);
+                    for (auto& pc : pics) {
+                        std::string e = extensionOf(pc.first);
+                        if (e == "png" || e == "jpg" || e == "jpeg" || e == "bmp" || e == "tga") job.pictures.push_back(pc.first);
+                    }
+                    continue;
+                }
+                if (a == "--livery" && k + 1 < argc) { job.liveries.push_back(parseLivery(argv[++k])); continue; }
+                size_t eq = a.find('=');
+                if (eq == std::string::npos) { printf("%s: key=value\n", a.c_str()); return 1; }
+                std::string key = a.substr(0, eq), val = a.substr(eq + 1);
+                if (key == "folder") job.folder = val;
+                else if (key == "name") job.modelName = val;
+                else if (key == "make") job.make = val;
+                else if (key == "make_key") job.makeKey = val;
+                else if (key == "upgrades") job.upgrades = val;
+                else if (key == "unlock") job.unlock = val;
+                else if (key == "id") job.id = (uint32_t)strtoul(val.c_str(), nullptr, 10);
+                else job.fields[key] = val;
+            }
+            std::vector<Rr3CarOutput> outs;
+            std::string report;
+            bool ok = rr3AddCar(job, assets, [&](const std::string& p, Bytes& b) {
+                auto it = full.find(p);
+                return it != full.end() && readFile(it->second, b);
+            }, outs, report);
+            printf("%s", report.c_str());
+            for (const Rr3CarOutput& o : outs) {
+                std::string target = outDir + "/" + o.path;
+                makeDirsFor(target);
+                if (!writeFile(target, o.data)) { printf("cannot write %s\n", target.c_str()); return 1; }
+            }
+            if (ok) printf("wrote %zu file(s) under %s - copy them over the game's depot folder\n", outs.size(), outDir.c_str());
+            return ok ? 0 : 1;
+        }
+        if (how == "build" && argc >= 6) {
+            //   rr3car build <gameFolder> <car> <outFolder> key=value ... [--sound <car.nct>]
+            //         [--model ext.fbx] [--interior int.fbx] [--textures <folder>]
+            std::string game = argv[3], outDir = argv[5];
+            std::vector<std::pair<std::string, std::string>> files;
+            scanLoose(game, "", files);
+            std::vector<std::string> assets;
+            std::map<std::string, std::string> full;
+            for (auto& f : files) { assets.push_back(f.second); full[f.second] = f.first; }
+            Rr3CarJob job;
+            job.car = argv[4];
+            for (int k = 6; k < argc; ++k) {
+                std::string a = argv[k];
+                if (a == "--sound" && k + 1 < argc) { if (!readFile(argv[++k], job.soundFrom)) { printf("cannot read %s\n", argv[k]); return 1; } continue; }
+                if (a == "--model" && k + 1 < argc) { job.modelPath = argv[++k]; continue; }
+                if (a == "--interior" && k + 1 < argc) { job.interiorPath = argv[++k]; continue; }
+                if (a == "--livery" && k + 1 < argc) { job.liveries.push_back(parseLivery(argv[++k])); continue; }
+                if (a == "--textures" && k + 1 < argc) {
+                    std::vector<std::pair<std::string, std::string>> pics;
+                    scanLoose(argv[++k], "", pics);
+                    for (auto& pc : pics) {
+                        std::string e = extensionOf(pc.first);
+                        if (e == "png" || e == "jpg" || e == "jpeg" || e == "bmp" || e == "tga") job.pictures.push_back(pc.first);
+                    }
+                    continue;
+                }
+                size_t eq = a.find('=');
+                if (eq == std::string::npos) { printf("%s: key=value\n", a.c_str()); return 1; }
+                job.fields[a.substr(0, eq)] = a.substr(eq + 1);
+            }
+            std::vector<Rr3CarOutput> outs;
+            std::string report;
+            bool ok = rr3CreateCar(job, assets, [&](const std::string& p, Bytes& b) {
+                auto it = full.find(p);
+                return it != full.end() && readFile(it->second, b);
+            }, outs, report);
+            printf("%s", report.c_str());
+            for (const Rr3CarOutput& o : outs) {
+                std::string target = outDir + "/" + o.path;
+                makeDirsFor(target);
+                if (!writeFile(target, o.data)) { printf("cannot write %s\n", target.c_str()); return 1; }
+                printf("wrote %s (%s)\n", target.c_str(), o.note.c_str());
+            }
+            return ok ? 0 : 1;
+        }
+        Bytes raw;
+        if (!readFile(argv[3], raw)) { printf("cannot read %s\n", argv[3]); return 1; }
+        Rr3Car car;
+        if (!rr3CarRead(raw.data(), raw.size(), car)) { printf("%s: %s\n", argv[3], car.why.c_str()); return 1; }
+        if (how == "show") {
+            for (const Rr3CarField& f : rr3CarFields(car))
+                printf("%-14s %-48s %s\n", f.key.c_str(), f.label.c_str(), f.value.c_str());
+            Bytes back = rr3CarPlain(car);
+            printf("(fields re-written give back the file %s)\n", back == car.plainOriginal ? "exactly" : "CHANGED");
+            return 0;
+        }
+        if (how == "set" && argc >= 5) {
+            for (int k = 5; k < argc; ++k) {
+                std::string a = argv[k];
+                if (a == "--sound" && k + 1 < argc) {
+                    Bytes o;
+                    Rr3Car other;
+                    std::string why;
+                    if (!readFile(argv[k + 1], o) || !rr3CarRead(o.data(), o.size(), other) ||
+                        !rr3CarCopySound(car, other, why)) { printf("--sound %s: %s\n", argv[k + 1], why.empty() ? other.why.c_str() : why.c_str()); return 1; }
+                    ++k;
+                    continue;
+                }
+                size_t eq = a.find('=');
+                if (eq == std::string::npos) { printf("%s: key=value\n", a.c_str()); return 1; }
+                std::string why;
+                if (!rr3CarSet(car, a.substr(0, eq), a.substr(eq + 1), why)) { printf("%s\n", why.c_str()); return 1; }
+            }
+            Bytes out;
+            std::string report;
+            bool ok = rr3CarWrite(car, out, report);
+            printf("%s\n", report.c_str());
+            if (!ok) return 1;
+            if (!writeFile(argv[4], out)) return 1;
+            printf("wrote %s\n", argv[4]);
+            return 0;
+        }
+        usage();
+        return 1;
+    }
+    if (cmd == "rr3track" && argc >= 4) {
+        std::vector<std::pair<std::string, std::string>> files;
+        scanLoose(argv[3], "", files);
+        std::vector<std::string> assets;
+        std::map<std::string, std::string> full;
+        for (auto& f : files) { assets.push_back(f.second); full[f.second] = f.first; }
+        auto rd = [&](const std::string& p, Bytes& b) { auto it = full.find(p); return it != full.end() && readFile(it->second, b); };
+        std::string how = argv[2];
+        if (how == "list") {
+            auto t = rr3ListTracks(assets, rd);
+            for (const Rr3TrackInfo& x : t) printf("%4d  %-44s %-22s %-10s %s\n", x.id, x.name.c_str(), x.folder.c_str(), x.time.c_str(), x.file.c_str());
+            printf("%zu track(s)\n", t.size());
+            return 0;
+        }
+        if (how == "add" && argc >= 5) {
+            Rr3NewTrackJob job;
+            for (int k = 5; k < argc; ++k) {
+                std::string a = argv[k];
+                size_t eq = a.find('=');
+                if (eq == std::string::npos) { printf("%s: key=value\n", a.c_str()); return 1; }
+                std::string key = a.substr(0, eq), val = a.substr(eq + 1);
+                if (key == "donor") job.donor = val; else if (key == "name") job.name = val;
+                else if (key == "location") job.location = val; else if (key == "country") job.country = val;
+                else if (key == "time") job.timeLabel = val; else if (key == "folder") job.newFolder = val;
+                else if (key == "model") job.modelPath = val; else if (key == "id") job.id = atoi(val.c_str());
+                else { printf("unknown setting %s\n", key.c_str()); return 1; }
+            }
+            std::vector<Rr3CarOutput> outs;
+            std::string report;
+            bool ok = rr3AddTrack(job, assets, rd, outs, report);
+            printf("%s", report.c_str());
+            if (!ok) return 1;
+            for (const Rr3CarOutput& o : outs) {
+                std::string target = std::string(argv[4]) + "/" + o.path;
+                makeDirsFor(target);
+                if (!writeFile(target, o.data)) { printf("cannot write %s\n", target.c_str()); return 1; }
+            }
+            printf("wrote %zu file(s) under %s\n", outs.size(), argv[4]);
+            return 0;
+        }
+        usage();
+        return 1;
+    }
+    if (cmd == "rr3series" && argc >= 4) {
+        std::string how = argv[2];
+        std::vector<std::pair<std::string, std::string>> files;
+        scanLoose(argv[3], "", files);
+        std::vector<std::string> assets;
+        std::map<std::string, std::string> full;
+        for (auto& f : files) { assets.push_back(f.second); full[f.second] = f.first; }
+        auto rd = [&](const std::string& p, Bytes& b) { auto it = full.find(p); return it != full.end() && readFile(it->second, b); };
+        if (how == "add" || how == "edit") {
+            if (argc < 5) { usage(); return 1; }
+            Rr3SeriesJob job;
+            for (int k = 5; k < argc; ++k) {
+                std::string a = argv[k];
+                size_t eq = a.find('=');
+                if (eq == std::string::npos) { printf("%s: key=value\n", a.c_str()); return 1; }
+                std::string key = a.substr(0, eq), val = a.substr(eq + 1);
+                if (key == "id") job.seriesId = atoi(val.c_str());
+                else if (key == "template") job.templateId = atoi(val.c_str());
+                else if (key == "title") job.title = val;
+                else if (key == "desc") job.description = val;
+                else if (key == "reward") job.completionReward = val;
+                else if (key == "group") job.group = val;
+                else if (key == "newgroup") job.newGroupTitle = val;
+                else if (key == "card") job.cardPicture = val;
+                else if (key == "cars") { for (const char* q = val.c_str(); *q;) { char* e; long v = strtol(q, &e, 10); if (e == q) { ++q; continue; } job.cars.push_back((int32_t)v); q = e; } }
+                else if (key == "event") {
+                    // Track name:type:laps[:tier]
+                    Rr3SeriesEvent E;
+                    std::vector<std::string> part;
+                    size_t from = 0;
+                    while (true) { size_t c = val.find(':', from); part.push_back(val.substr(from, c == std::string::npos ? std::string::npos : c - from)); if (c == std::string::npos) break; from = c + 1; }
+                    E.track = part[0];
+                    if (part.size() > 1) E.type = atoi(part[1].c_str());
+                    if (part.size() > 2) E.laps = atoi(part[2].c_str());
+                    if (part.size() > 3) E.tier = atoi(part[3].c_str());
+                    job.events.push_back(E);
+                }
+                else { printf("unknown setting %s\n", key.c_str()); return 1; }
+            }
+            if (how == "edit" && job.seriesId < 0) { printf("edit needs id=<series id>\n"); return 1; }
+            std::vector<Rr3CarOutput> outs;
+            std::string report;
+            int32_t made = -1;
+            bool ok = rr3SeriesBuild(job, assets, rd, outs, report, &made);
+            printf("%s", report.c_str());
+            if (!ok) return 1;
+            for (const Rr3CarOutput& o : outs) {
+                std::string target = std::string(argv[4]) + "/" + o.path;
+                makeDirsFor(target);
+                if (!writeFile(target, o.data)) { printf("cannot write %s\n", target.c_str()); return 1; }
+            }
+            printf("series %d: wrote %zu file(s) under %s\n", made, outs.size(), argv[4]);
+            return 0;
+        }
+        std::string ev;
+        for (const std::string& a : assets) { std::string l = a; for (char& c : l) if (c == '\\') c = '/'; if (l.size() >= 19 && l.compare(l.size() - 19, 19, "data/events.dat.nct") == 0) ev = a; }
+        Bytes raw, plain;
+        if (ev.empty() || !rd(ev, raw)) { printf("no data/events.dat.nct in %s\n", argv[3]); return 1; }
+        nctTransform(raw.data(), raw.size(), plain);
+        Rr3Career c;
+        std::string why;
+        if (!rr3CareerRead(plain.data(), plain.size(), c, why)) { printf("%s\n", why.c_str()); return 1; }
+        Rr3Texts texts;
+        texts.load(assets, rd);
+        if (how == "roundtrip") {
+            bool same = rr3CareerWrite(c) == plain;
+            printf("%zu series, %zu tiers, %zu track names, %u AI grids: written back %s\n", c.series.size(), c.tiers.size(),
+                   c.tracks.size(), c.grids, same ? "byte for byte" : "DIFFERENTLY");
+            return same ? 0 : 1;
+        }
+        if (how == "tracks") { for (const std::string& t : rr3CareerTracks(c)) printf("%s\n", t.c_str()); return 0; }
+        if (how == "groups") {
+            for (const Rr3CareerGroup& g : rr3CareerGroups(c))
+                printf("%-60s type %d  %3zu series  %s  \"%s\"\n", g.path.c_str(), g.type, g.series, g.card.c_str(), texts.get(g.key).c_str());
+            return 0;
+        }
+        std::map<int32_t, std::pair<int, int>> counts;
+        for (const Rr3Tier& t : c.tiers) { counts[t.seriesId()].first++; counts[t.seriesId()].second += (int)t.events.size(); }
+        if (how == "list") {
+            for (const Rr3Series& s : c.series)
+                printf("%5d  %-46s %2d tier(s) %3d event(s)  %s\n", s.id(), texts.get(s.titleKey()).empty() ? s.titleKey().c_str() : texts.get(s.titleKey()).c_str(),
+                       counts[s.id()].first, counts[s.id()].second, rr3CareerGroupOf(c, s.id()).c_str());
+            printf("%zu series\n", c.series.size());
+            return 0;
+        }
+        if (how == "show" && argc >= 5) {
+            int32_t id = atoi(argv[4]);
+            for (const Rr3Series& s : c.series) {
+                if (s.id() != id) continue;
+                printf("series %d  %s  \"%s\"\n  %s\n  type %d, reward \"%s\", group %s\n", id, s.titleKey().c_str(), texts.get(s.titleKey()).c_str(),
+                       texts.get(s.descKey()).c_str(), s.type(), s.completionReward().c_str(), rr3CareerGroupOf(c, id).c_str());
+                for (const Rr3Tier& t : c.tiers) {
+                    if (t.seriesId() != id) continue;
+                    printf("  tier %d (id %d), cars:", t.indexInSeries(), t.id());
+                    for (const auto& car : t.cars) printf(" %d", car.first);
+                    printf("\n");
+                    for (const Rr3Event& e : t.events)
+                        printf("    event %6d  type %2d  %-36s %2d lap(s)  fame %d  reward %d\n", e.id(), e.type(), e.track().c_str(), e.laps(), e.fame(), e.reward());
+                }
+                return 0;
+            }
+            printf("no series %d\n", id);
+            return 1;
+        }
+        usage();
+        return 1;
+    }
+    if (cmd == "rr3" && argc >= 4 && std::string(argv[2]) == "check") {
+        // every Real Racing 3 file the tool rewrites, read and written back
+        std::vector<std::pair<std::string, std::string>> files;
+        scanLoose(argv[3], "", files);
+        int liv = 0, livOk = 0, cars = 0, carsOk = 0, other = 0, otherOk = 0;
+        for (auto& f : files) {
+            std::string l = f.second;
+            for (char& c : l) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (l.size() < 4 || l.compare(l.size() - 4, 4, ".nct") != 0) continue;
+            Bytes raw, p;
+            if (!readFile(f.first, raw)) continue;
+            nctTransform(raw.data(), raw.size(), p);
+            Bytes back;
+            nctEncode(p.data(), p.size(), back);
+            if (back != raw) { printf("CODEC MISMATCH %s\n", f.second.c_str()); continue; }
+            if (l.find(".liveries.bin.nct") != std::string::npos && l.find("default.") == std::string::npos) {
+                ++liv;
+                Rr3Liveries L;
+                if (rr3LiveriesRead(p.data(), p.size(), L) && rr3LiveriesWrite(L) == p) ++livOk;
+                else printf("liveries: %s does not read back\n", f.second.c_str());
+            } else if (l.find("vehicles/data/") != std::string::npos && l.find('/', l.find("vehicles/data/") + 14) == std::string::npos &&
+                       l[l.find("vehicles/data/") + 14] >= '0' && l[l.find("vehicles/data/") + 14] <= '9') {
+                ++cars;
+                Rr3Car c;
+                if (rr3CarRead(raw.data(), raw.size(), c) && rr3CarPlain(c) == c.plainOriginal) ++carsOk;
+                else printf("car data: %s: %s\n", f.second.c_str(), c.why.c_str());
+            } else if (l.size() >= 19 && l.compare(l.size() - 19, 19, "data/events.dat.nct") == 0) {
+                ++other;
+                Rr3Career c;
+                std::string why;
+                if (rr3CareerRead(p.data(), p.size(), c, why) && rr3CareerWrite(c) == p) ++otherOk;
+                else printf("career: %s %s\n", f.second.c_str(), why.c_str());
+            }
+        }
+        printf("liveries lists %d/%d, car data %d/%d, career %d/%d read and written back exactly\n",
+               livOk, liv, carsOk, cars, otherOk, other);
+        return (livOk == liv && carsOk == cars && otherOk == other) ? 0 : 1;
+    }
+    if (cmd == "rr3" && argc >= 5) {
+        // the game's RC4 on its own: .nct / .gui, and the text files
+        std::string how = argv[2], in = argv[3];
+        Bytes raw, out;
+        if (!readFile(in, raw)) { printf("cannot read %s\n", in.c_str()); return 1; }
+        size_t sl = in.find_last_of("/\\");
+        std::string leaf = sl == std::string::npos ? in : in.substr(sl + 1);
+        for (char& ch : leaf) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+        bool text = leaf == "gametext.txt" || (leaf.compare(0, 5, "text_") == 0 && leaf.size() > 4 && leaf.substr(leaf.size() - 4) == ".txt");
+        if (how == "decode" && text && rr3TextIsPlain(raw.data(), raw.size())) { printf("%s is not scrambled\n", in.c_str()); out = raw; }
+        else if (text) rr3TextTransform(raw.data(), raw.size(), out);
+        else nctTransform(raw.data(), raw.size(), out);
+        if (!writeFile(argv[4], out)) return 1;
+        printf("wrote %s (%zu bytes)\n", argv[4], out.size());
         return 0;
     }
     if (cmd == "newcar") {
@@ -503,10 +1065,11 @@ int main(int argc, char** argv) {
 
     if (cmd == "one") {
         if (argc < 4) { usage(); return 1; }
-        std::string in = argv[2], out = argv[3], fmt, wheelPath;
+        std::string in = argv[2], out = argv[3], fmt, wheelPath, kit;
         for (int i = 4; i < argc - 1; ++i) {
             if (!strcmp(argv[i], "--format")) fmt = argv[i + 1];
             if (!strcmp(argv[i], "--wheel")) wheelPath = argv[i + 1];
+            if (!strcmp(argv[i], "--kit")) kit = argv[i + 1];
         }
         if (fmt.empty()) {
             auto f = formatsFor(in);
@@ -537,7 +1100,7 @@ int main(int argc, char** argv) {
             printf("using %s\n", pointsPath.c_str());
         // a No Limits car with its wheel model: wheel_<car>.sb3d beside it,
         // or named with --wheel
-        if (extensionOf(in) == "sb3d" && (fmt == "fbx" || fmt == "obj") &&
+        if (extensionOf(in) == "sb3d" && (fmt == "fbx" || fmt == "obj" || fmt == "glb") &&
             baseName(in).compare(0, 6, "wheel_") != 0) {
             if (wheelPath.empty()) {
                 std::string dir = in.substr(0, in.find_last_of("/\\") + 1);
@@ -546,22 +1109,28 @@ int main(int argc, char** argv) {
                 if (f) { fclose(f); wheelPath = guess; }
             }
             Bytes wb;
-            if (!wheelPath.empty() && readFile(wheelPath, wb)) {
+            bool haveWheel = !wheelPath.empty() && readFile(wheelPath, wb);
+            if (haveWheel || !kit.empty()) {
                 Model car = loadModel(data.data(), data.size());
-                Model wheel = loadModel(wb.data(), wb.size());
-                if (car.valid && nlAttachWheels(car, wheel) > 0) {
-                    Bytes result;
-                    if (writeModel(car, fmt, result) && writeFile(out, result)) {
-                        printf("using %s\nwrote %s (%zu bytes) with wheels\n",
-                               wheelPath.c_str(), out.c_str(), result.size());
-                        return 0;
-                    }
+                int hung = 0;
+                if (car.valid && haveWheel) {
+                    Model wheel = loadModel(wb.data(), wb.size());
+                    hung = nlAttachWheels(car, wheel);
+                }
+                // --kit stock | all | b, c ...: that body kit only (all: every part, all shown)
+                if (car.valid && !kit.empty())
+                    printf("body kit %s: %d part(s) of other kits left out\n", kit.c_str(), keepKit(car, kit));
+                Bytes result;
+                if (car.valid && cliWriteModel(car, fmt, result, in) && writeFile(out, result)) {
+                    if (hung) printf("using %s\n", wheelPath.c_str());
+                    printf("wrote %s (%zu bytes)%s\n", out.c_str(), result.size(), hung ? " with wheels" : "");
+                    return 0;
                 }
             }
         }
         // a Real Racing 2 car: textures paired by file name, parts placed
         // from its .points
-        if (extensionOf(in) == "m3g" && (fmt == "fbx" || fmt == "obj") &&
+        if (extensionOf(in) == "m3g" && (fmt == "fbx" || fmt == "obj" || fmt == "glb") &&
             baseName(in).compare(0, 4, "car_") == 0) {
             Model car = loadModel(data.data(), data.size());
             if (car.valid) {
@@ -571,7 +1140,7 @@ int main(int argc, char** argv) {
                 }
                 rr2AssignTextures(car, in);
                 Bytes result;
-                if (writeModel(car, fmt, result) && writeFile(out, result)) {
+                if (cliWriteModel(car, fmt, result, in) && writeFile(out, result)) {
                     printf("wrote %s (%zu bytes)\n", out.c_str(), result.size());
                     return 0;
                 }
@@ -579,7 +1148,7 @@ int main(int argc, char** argv) {
         }
         // a Real Racing 3 car: the steering wheel's point from the cockpit's
         // .points, and textures from the files beside the model
-        if (extensionOf(in) == "m3g" && (fmt == "fbx" || fmt == "obj") &&
+        if (extensionOf(in) == "m3g" && (fmt == "fbx" || fmt == "obj" || fmt == "glb") &&
             identifierVersionOf(data.data(), data.size()) == 1) {
             Model car = loadModel(data.data(), data.size());
             if (car.valid) {
@@ -591,7 +1160,7 @@ int main(int argc, char** argv) {
                     rr3MergeCockpitPoints(pts, rr3ReadPoints(inner.data(), inner.size()));
                     printf("using %s for the cockpit points\n", innerPath.c_str());
                 }
-                if (!pts.empty()) rr3PlaceParts(car, pts);
+                if (!pts.empty()) { rr3PlaceParts(car, pts); cliAlignSteering(car, in, inner, true); }
                 std::string dir = in.substr(0, in.find_last_of("/\\") + 1);
                 std::string missing;
                 int n = cliRr3Textures(car, in, dir.empty() ? "./" : dir, &missing);
@@ -599,7 +1168,7 @@ int main(int argc, char** argv) {
                 for (const std::string& w : car.warnings) printf("  %s\n", w.c_str());
                 if (n) printf("  %d part(s) textured\n", n);
                 Bytes result;
-                if (writeModel(car, fmt, result) && writeFile(out, result)) {
+                if (cliWriteModel(car, fmt, result, in) && writeFile(out, result)) {
                     printf("wrote %s (%zu bytes)\n", out.c_str(), result.size());
                     return 0;
                 }
@@ -720,6 +1289,7 @@ int main(int argc, char** argv) {
         if (argc < 4) { usage(); return 1; }
         std::string in = argv[2], out = argv[3], texRoot, forceTex;
         bool flipUvTest = false;
+        std::vector<std::string> hideParts;
         std::string onlyPart;       // draw the parts whose name holds this
         int W = 960, H = 540;
         std::string renderWheel;
@@ -728,8 +1298,8 @@ int main(int argc, char** argv) {
         float animT = -1;
         RenderView view;
         float posX = 0, posY = 0, posZ = 0;
-        bool haveYaw = false, havePitch = false;
-        float yawDeg = 0, pitchDeg = 0;
+        bool haveYaw = false, havePitch = false, haveCentre = false;
+        float yawDeg = 0, pitchDeg = 0, dist = 0, centreAt[3] = {0, 0, 0};
         for (int i = 4; i < argc; ++i) {
             std::string a = argv[i];
             auto next = [&](int n) { return i + n < argc ? (float)atof(argv[i + n]) : 0.0f; };
@@ -739,6 +1309,10 @@ int main(int argc, char** argv) {
             else if (a == "--pos" && i + 3 < argc) {
                 posX = next(1); posY = next(2); posZ = next(3); i += 3;
             }
+            else if (a == "--centre" && i + 3 < argc) {
+                centreAt[0] = next(1); centreAt[1] = next(2); centreAt[2] = next(3); haveCentre = true; i += 3;
+            }
+            else if (a == "--dist" && i + 1 < argc) { dist = next(1); ++i; }
             else if (a == "--lod" && i + 1 < argc) { view.lodFilter = argv[++i]; }
             else if (a == "--kit" && i + 1 < argc) { view.kit = argv[++i]; }
             else if (a == "--vcolor") { view.vertexColors = true; }
@@ -746,6 +1320,7 @@ int main(int argc, char** argv) {
             else if (a == "--forcetex" && i + 1 < argc) { forceTex = argv[++i]; }
             else if (a == "--flipuv") { flipUvTest = true; }
             else if (a == "--only" && i + 1 < argc) { onlyPart = argv[++i]; }
+            else if (a == "--hide" && i + 1 < argc) { hideParts.push_back(argv[++i]); }
             else if (a == "--twosided") view.twoSided = true;
             else if (a == "--wheel" && i + 1 < argc) { renderWheel = argv[++i]; }
             else if (a == "--anim" && i + 1 < argc) { animT = (float)atof(argv[++i]); }
@@ -756,6 +1331,15 @@ int main(int argc, char** argv) {
         Bytes data;
         if (!readFile(in, data)) { printf("cannot read %s\n", in.c_str()); return 1; }
         Model m = loadModel(data.data(), data.size());
+        if (!hideParts.empty()) {
+            std::vector<Mesh> keep;
+            for (Mesh& me : m.meshes) {
+                bool hide = false;
+                for (const std::string& h : hideParts) if (me.name.find(h) != std::string::npos) hide = true;
+                if (!hide) keep.push_back(std::move(me));
+            }
+            m.meshes.swap(keep);
+        }
         if (!onlyPart.empty()) {
             std::vector<Mesh> keep;
             for (Mesh& me : m.meshes) if (me.name.find(onlyPart) != std::string::npos) keep.push_back(std::move(me));
@@ -852,6 +1436,7 @@ int main(int argc, char** argv) {
                 }
                 if (!pts.empty()) {
                     rr3PlaceParts(m, pts);
+                    cliAlignSteering(m, in, inner, true);
                     if (rr1IsCar(m)) {
                         // the .rr_car beside it that names this model
                         Rr1Car car;
@@ -886,7 +1471,10 @@ int main(int argc, char** argv) {
                             if (readFile(own, tb))
                                 for (Mesh& me : wheel.meshes) if (me.texture.empty()) me.texture = baseName(own);
                         }
-                        printf("wheels from %s: %d\n", wp.c_str(), rr3AttachWheels(m, wheel, pts, rr1IsCar(m)));
+                        float d[2];
+                        bool have = !rr1IsCar(m) && cliTyreDiameters(in, d);
+                        printf("wheels from %s: %d\n", wp.c_str(),
+                               rr3AttachWheels(m, wheel, pts, rr1IsCar(m), have ? d : nullptr));
                     }
                 }
             }
@@ -1003,6 +1591,11 @@ int main(int argc, char** argv) {
         if (getenv("MT_FORCETEX"))
             for (Mesh& me : m.meshes) me.texture = getenv("MT_FORCETEX");
         frameModel(m, view);
+        if (haveCentre) {           // a close look: orbit this point, not the model
+            for (int k = 0; k < 3; ++k) view.centre[k] = centreAt[k];
+            view.sky = view.floor = false;
+        }
+        if (dist > 0) view.distance = dist;
         if (haveYaw)   view.yaw   = yawDeg   * 3.14159265f / 180.0f;
         if (havePitch) view.pitch = pitchDeg * 3.14159265f / 180.0f;
         view.modelPos[0] = posX; view.modelPos[1] = posY; view.modelPos[2] = posZ;
@@ -1108,8 +1701,7 @@ int main(int argc, char** argv) {
         if (!forceTex.empty()) {
             Bytes tb;
             if (readFile(forceTex, tb)) {
-                auto entries = readSba(tb.data(), tb.size());
-                if (!entries.empty() && decodeImageAuto(entries[0], forced)) {
+                if (decodeTextureFile(tb.data(), tb.size(), forced)) {
                     perMesh.assign(m.meshes.size(), &forced);
                     printf("forced texture %dx%d\n", forced.width, forced.height);
                 }

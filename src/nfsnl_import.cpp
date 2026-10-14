@@ -666,6 +666,11 @@ std::map<std::string, MeshPlacement> meshPlacements(const Model& raw, const Mode
             Mesh b = *it->second;
             computeBounds(b);
             for (int k = 0; k < 3; ++k) mp.offset[k] = (b.bboxMin[k] + b.bboxMax[k]) * 0.5f - mp.centre[k];
+            if (it->second->placeRotated) {
+                mp.rotated = true;
+                memcpy(mp.rot, it->second->placeRot, sizeof(mp.rot));
+                memcpy(mp.move, it->second->placeMove, sizeof(mp.move));
+            }
         }
         out[m.name] = mp;
     }
@@ -1168,7 +1173,22 @@ static bool replaceOrBuild(const Bytes& original, const Model& importedIn,
                     dPlaced += (c - mp.centre[k] - mp.offset[k]) * (c - mp.centre[k] - mp.offset[k]);
                 }
                 for (float& x : src.positions) x *= unitScale;
-                if (dPlaced < dFile)
+                if (dPlaced < dFile && mp.rotated) {
+                    // turned and moved on its hinge: p = R^T (p' - move), the
+                    // normals turned back the same way
+                    const float* R = mp.rot;
+                    for (size_t i = 0; i + 2 < src.positions.size(); i += 3) {
+                        float d[3] = { src.positions[i] - mp.move[0], src.positions[i + 1] - mp.move[1],
+                                       src.positions[i + 2] - mp.move[2] };
+                        for (int k = 0; k < 3; ++k)
+                            src.positions[i + k] = R[0 + k] * d[0] + R[3 + k] * d[1] + R[6 + k] * d[2];
+                    }
+                    for (size_t i = 0; i + 2 < src.normals.size(); i += 3) {
+                        float d[3] = { src.normals[i], src.normals[i + 1], src.normals[i + 2] };
+                        for (int k = 0; k < 3; ++k)
+                            src.normals[i + k] = R[0 + k] * d[0] + R[3 + k] * d[1] + R[6 + k] * d[2];
+                    }
+                } else if (dPlaced < dFile)
                     for (size_t i = 0; i + 2 < src.positions.size(); i += 3)
                         for (int k = 0; k < 3; ++k) src.positions[i + k] -= mp.offset[k];
             } else {

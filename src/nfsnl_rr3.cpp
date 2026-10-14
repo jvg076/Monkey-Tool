@@ -85,6 +85,70 @@ void translateMeshBy(Mesh& m, const float t[3]) {
         m.positions[i + 2] += t[2];
     }
     for (int c = 0; c < 3; ++c) { m.bboxMin[c] += t[c]; m.bboxMax[c] += t[c]; }
+    for (int c = 0; c < 3; ++c) m.placeMove[c] += t[c];
+}
+
+// Turn a part about the file's origin (where it is modelled) by R, row-major,
+// p' = R p. Normals turn with it; the bounds are measured again; the turn is
+// recorded so an import can undo it.
+void rotateMeshBy(Mesh& m, const float R[9]) {
+    auto apply = [&](std::vector<float>& v) {
+        for (size_t i = 0; i + 2 < v.size(); i += 3) {
+            float x = v[i], y = v[i + 1], z = v[i + 2];
+            v[i]     = R[0] * x + R[1] * y + R[2] * z;
+            v[i + 1] = R[3] * x + R[4] * y + R[5] * z;
+            v[i + 2] = R[6] * x + R[7] * y + R[8] * z;
+        }
+    };
+    apply(m.positions);
+    apply(m.normals);
+    if (!m.positions.empty()) {
+        for (int c = 0; c < 3; ++c) m.bboxMin[c] = m.bboxMax[c] = m.positions[c];
+        for (size_t i = 0; i + 2 < m.positions.size(); i += 3)
+            for (int c = 0; c < 3; ++c) {
+                m.bboxMin[c] = std::min(m.bboxMin[c], m.positions[i + c]);
+                m.bboxMax[c] = std::max(m.bboxMax[c], m.positions[i + c]);
+            }
+    }
+    // compose with what was there: R * (R0 p + t0) = (R R0) p + R t0
+    float R0[9], t0[3];
+    memcpy(R0, m.placeRot, sizeof(R0));
+    memcpy(t0, m.placeMove, sizeof(t0));
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c)
+            m.placeRot[r * 3 + c] = R[r * 3] * R0[c] + R[r * 3 + 1] * R0[3 + c] + R[r * 3 + 2] * R0[6 + c];
+        m.placeMove[r] = R[r * 3] * t0[0] + R[r * 3 + 1] * t0[1] + R[r * 3 + 2] * t0[2];
+    }
+    m.placeRotated = true;
+}
+
+// The turn a HINGE_STEERING_WHEEL asks for. Its basis rows (in the model's
+// axes) are the wheel's forward, left and up: the Ferrari SF24's is exactly
+// forward (0,0,-1), left (-1,0,0), up (0,1,0) - the wheel as it is modelled -
+// and the Taycan Turbo GT's up is (0, 0.966, -0.259), the top raked 15
+// degrees towards the dashboard. So the part turns by R = B^T * M0, M0 that
+// neutral frame. False (no turn) for a basis that is not a rotation.
+bool hingeTurn(const Hardpoint& h, float R[9]) {
+    if (!h.hinge) return false;
+    const float* B = h.basis;
+    for (int r = 0; r < 3; ++r) {
+        float len = B[r * 3] * B[r * 3] + B[r * 3 + 1] * B[r * 3 + 1] + B[r * 3 + 2] * B[r * 3 + 2];
+        if (std::fabs(len - 1.0f) > 0.05f) return false;
+    }
+    static const float M0[9] = { 0, 0, -1,   -1, 0, 0,   0, 1, 0 };
+    bool identity = true;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) {
+            // (B^T M0)[r][c] = sum_k B[k][r] * M0[k][c]
+            float v = B[0 * 3 + r] * M0[0 * 3 + c] + B[1 * 3 + r] * M0[1 * 3 + c] + B[2 * 3 + r] * M0[2 * 3 + c];
+            R[r * 3 + c] = v;
+            if (std::fabs(v - (r == c ? 1.0f : 0.0f)) > 1e-3f) identity = false;
+        }
+    // a proper rotation only (no mirror)
+    float det = R[0] * (R[4] * R[8] - R[5] * R[7]) - R[1] * (R[3] * R[8] - R[5] * R[6]) +
+                R[2] * (R[3] * R[7] - R[4] * R[6]);
+    if (std::fabs(det - 1.0f) > 0.05f) return false;
+    return !identity;
 }
 
 void pointToModel(const float in[3], float out[3]) {
@@ -221,6 +285,58 @@ static std::vector<Hardpoint> rr1ReadPoints(const uint8_t* data, size_t len) {
         out.push_back(h);
     }
     return out;
+}
+
+bool rr3PointsSetPosition(Bytes& file, const std::string& name, const float pos[3]) {
+    const uint8_t* data = file.data();
+    size_t len = file.size();
+    if (len < 4) return false;
+    uint16_t version = rd16(data), count = rd16(data + 2);
+    if (2 + (size_t)version * 6 == len && version >= 4) return false;   // Real Racing 1: no names
+    if (version == 0 || version > 8 || count > 4096) return false;
+    // the model's space back to the file's (pointToModel the other way round)
+    float raw[3] = { pos[0] / kPointScale, -pos[2] / kPointScale, pos[1] / kPointScale };
+    auto putF = [&](size_t at, float v, bool fixed) {
+        uint32_t u;
+        if (fixed) { int32_t i = (int32_t)std::lround(v * 65536.0f); memcpy(&u, &i, 4); }
+        else memcpy(&u, &v, 4);
+        for (int k = 0; k < 4; ++k) file[at + k] = (uint8_t)(u >> (8 * k));
+    };
+    size_t p = 4;
+    for (uint16_t i = 0; i < count && p + 4 <= len; ++i) {
+        uint16_t type = rd16(data + p), recLen = rd16(data + p + 2);
+        p += 4;
+        if (recLen == 0 || p + recLen > len) break;
+        size_t rec = p;
+        p += recLen;
+        size_t nameLen = 0;
+        while (rec + nameLen < len && nameLen < recLen && data[rec + nameLen] != 0) ++nameLen;
+        if (nameLen + 1 > recLen) continue;
+        std::string n((const char*)data + rec, nameLen);
+        size_t f = rec + nameLen + 1;
+        if (type == 1 && recLen > nameLen + 5) {
+            // a spline: subtype, node count, then triples
+            uint16_t nodes = rd16(data + f + 2);
+            size_t avail = recLen - nameLen - 1;
+            if (!nodes || (size_t)nodes * 12 + 4 > avail || nodes > 512) continue;
+            if (name.size() <= n.size() + 1 || name.compare(0, n.size(), n) != 0 || name[n.size()] != '.') continue;
+            int k = atoi(name.c_str() + n.size() + 1);
+            if (k < 0 || k >= nodes) return false;
+            size_t at = f + 4 + (size_t)k * 12;
+            for (int c = 0; c < 3; ++c) putF(at + 4 * c, raw[c], false);
+            return true;
+        }
+        if (n != name || (recLen - nameLen - 1) / 4 < 3) continue;
+        // Real Racing 2 keeps 16.16 fixed point where Real Racing 3 has floats
+        bool fixed = false;
+        for (int c = 0; c < 3; ++c) {
+            float v = rdf(data + f + 4 * c);
+            if (!std::isfinite(v) || (v != 0.0f && std::fabs(v) < 1e-30f)) fixed = true;
+        }
+        for (int c = 0; c < 3; ++c) putF(f + 4 * c, raw[c], fixed);
+        return true;
+    }
+    return false;
 }
 
 std::vector<Hardpoint> rr3ReadPoints(const uint8_t* data, size_t len) {
@@ -768,487 +884,108 @@ bool rr3PoseDriver(Model& m, const uint8_t* banim, size_t len) {
 // ============================================================== .nct
 //
 // `106_2011_pagani_huayra.bin.nct` is a car's data file: the underlying thing
-// is a `.bin`, and `.nct` is a layer on top of it. It is not compressed and it
-// is not really encrypted either - it is one fixed pad XORed over the file
-// from byte 0, the same pad for every car:
+// is a `.bin`, and `.nct` is a layer on top of it. Every .nct and every
+// scrambled .gui uses one keystream XORed over the file from byte 0:
 //
-//     plain[i] = cipher[i] ^ PAD[i]
+//     plain[i] = cipher[i] ^ KS[i]
 //
-// Which is why XORing any two .nct files together cancels the pad and leaves
-// readable game data - that is how the pad below was recovered, from four
-// cars, with the plaintext cross-checked four ways at a time. Two examples of
-// what pins a byte exactly: bytes 4..7 are the car id and read 106, 107, 108,
-// 109 across the four samples, and bytes 12..15 are the model year as ASCII
-// and read "2011", "2005", "2009", "2010". Both fix their pad bytes with no
-// freedom left.
-//
-// What is honest about this: 237 of the 1069 pad bytes are pinned that way.
-// The rest were solved statistically against the file's own structure and a
-// few of them are wrong, which shows up as a garbled character inside an
-// otherwise readable string. The pad generator itself was not identified -
-// it is aperiodic over 1069 bytes, and a repeating key of every length up to
-// 534, several LCGs, xorshift, java.util.Random and glibc rand were each
-// tested and ruled out - so anything past 1069 bytes cannot be decoded at all.
-// More .nct files would fix both limits.
-//
-// Editing works regardless: the same XOR encodes as it decodes, so a byte the
-// user does not touch comes back exactly as it went in, whether or not this
-// pad has that byte right.
+// KS is RC4 with a non-standard starting S-box and the first 133 bytes dropped
+// (see nct_rc4.inc, read out of libRealRacing3.so). Earlier versions of the
+// tool learned the stream statistically from the game's own files and knew
+// about 70 KB of it; the real generator gives all of it, so every file -
+// events.dat (14 MB), championships, jobs, the liveries tables - now decodes
+// and encodes exactly.
 
 namespace {
-#include "nct_pad.inc"
+#include "nct_rc4.inc"
 
-// The pad shipped above came from four cars. A whole game holds one .nct per
-// car, so the tool can finish the job off the user's own files - see
-// nctLearnPad below. What it learns lives here and takes precedence.
-std::vector<uint8_t> g_padLearned;
-std::vector<uint8_t> g_padLearnedSure;    // one byte per offset, 0 or 1
-bool g_ignoreShipped = false;             // only for testing the learner
-
-bool nctPadSure(size_t i) {
-    if (i < g_padLearnedSure.size() && g_padLearnedSure[i]) return true;
-    if (g_ignoreShipped) return false;
-    return i < kNctPadLen && (kNctPadSure[i >> 3] >> (i & 7)) & 1;
-}
-
-// the pad byte in force at an offset, learned first, shipped second
-bool padAt(size_t i, uint8_t& b) {
-    if (i < g_padLearned.size() && i < g_padLearnedSure.size() && g_padLearnedSure[i]) {
-        b = g_padLearned[i];
-        return true;
-    }
-    if (i < kNctPadLen && !g_ignoreShipped) { b = kNctPad[i]; return true; }
-    if (i < g_padLearned.size()) { b = g_padLearned[i]; return true; }
-    return false;
-}
-} // namespace
-
-bool nctPadByteKnown(size_t i) { return nctPadSure(i); }
-
-size_t nctPadLength() {
-    return std::max(kNctPadLen, (size_t)g_padLearned.size());
-}
-
-size_t nctPadKnownBytes() {
-    size_t n = 0, len = nctPadLength();
-    for (size_t i = 0; i < len; ++i) if (nctPadSure(i)) ++n;
-    return n;
-}
-
-bool nctTransform(const uint8_t* data, size_t len, Bytes& out, size_t* covered) {
-    out.assign(data, data + len);
-    size_t n = 0;
-    for (size_t i = 0; i < len; ++i) {
-        uint8_t b;
-        if (!padAt(i, b)) break;
-        out[i] = (uint8_t)(data[i] ^ b);
-        ++n;
-    }
-    if (covered) *covered = n;
-    return n > 0;
-}
-
-// Finish the pad from a whole game's worth of .nct files.
-//
-// The cipher is one fixed pad XORed over every file, so at a given offset two
-// cars produce the same ciphertext byte exactly when their plaintext bytes
-// agree. These are struct-shaped data files: most offsets hold a zero in most
-// cars, so the commonest ciphertext byte at an offset is the pad byte itself.
-// One car cannot show that; two hundred can, and the margin says how firmly.
-//
-// Nothing is taken on faith. The bytes already pinned by known plaintext are
-// used as a scoreboard: the same rule is run against them, and if it does not
-// reproduce them it is not trusted for the rest either. That agreement figure
-// is reported rather than hidden.
-namespace {
-
-// ---- evidence for the pad --------------------------------------------------
-//
-// Every clue about the pad is a vote: "at offset i, file f holds plaintext
-// byte p", which says pad[i] = cipher_f[i] ^ p. Votes carry a weight for how
-// much the clue is worth, and the pad byte at an offset is the value with the
-// most weight behind it. Nothing is ever pinned outright by a single clue, so
-// one wrong guess is outvoted by the files that disagree with it instead of
-// spreading - which is what went wrong with plain crib dragging.
-struct PadVotes {
-    std::vector<std::array<float, 256>> w;
-    explicit PadVotes(size_t n) : w(n) { for (auto& a : w) a.fill(0.0f); }
-    void add(const Bytes& f, size_t off, uint8_t plain, float weight) {
-        if (off < f.size() && off < w.size()) w[off][f[off] ^ plain] += weight;
-    }
-    int best(size_t i, float* top = nullptr, float* second = nullptr) const {
-        int b = -1; float t = 0, s2 = 0;
-        for (int v = 0; v < 256; ++v) {
-            float x = w[i][v];
-            if (x > t) { s2 = t; t = x; b = v; } else if (x > s2) s2 = x;
+// The keystream is the same for every file. Making it is cheap (one RC4 step
+// per byte), so each call runs its own generator - no shared state to guard
+// across the viewer's worker threads.
+struct NctRc4 {
+    uint8_t S[256];
+    unsigned i = 0, j = 0;
+    NctRc4(const uint8_t* key = kNctRc4Key, unsigned drop = kNctRc4Drop) {
+        memcpy(S, kNctRc4Init, 256);
+        for (unsigned k = 0; k < 256; ++k) {
+            uint8_t t = S[k];
+            j = (j + t + key[k & 7]) & 255;
+            S[k] = S[j];
+            S[j] = t;
         }
-        if (top) *top = t;
-        if (second) *second = s2;
-        return b;
+        j = 0;
+        for (unsigned k = 0; k < drop; ++k) {
+            i = (i + 1) & 255;
+            j = (j + S[i]) & 255;
+            std::swap(S[i], S[j]);
+        }
+    }
+    uint8_t next() {
+        i = (i + 1) & 255;
+        j = (j + S[i]) & 255;
+        std::swap(S[i], S[j]);
+        return S[(S[i] + S[j]) & 255];
     }
 };
+} // namespace
 
-// The car a file belongs to, as its own name spells it:
-//   "1969_dodge_charger_rt.liveries.bin.nct" -> "1969_dodge_charger_rt"
-std::string nctStem(const std::string& name) {
-    std::string b = baseName(name);
-    for (const char* tail : {".liveries.bin.nct", ".bin.nct", ".nct", ".gui"})
-        if (endsWith(b, tail)) return b.substr(0, b.size() - strlen(tail));
-    return b;
+bool nctPadByteKnown(size_t) { return true; }
+size_t nctPadLength() { return (size_t)-1; }
+size_t nctPadKnownBytes() { return (size_t)-1; }
+
+bool nctTransform(const uint8_t* data, size_t len, Bytes& out, size_t* covered) {
+    out.resize(len);
+    NctRc4 rc;
+    for (size_t i = 0; i < len; ++i) out[i] = (uint8_t)(data[i] ^ rc.next());
+    if (covered) *covered = len;
+    return len > 0;
 }
+
+bool rr3TextTransform(const uint8_t* data, size_t len, Bytes& out) {
+    out.resize(len);
+    NctRc4 rc(kTextRc4Key, kTextRc4Drop);
+    for (size_t i = 0; i < len; ++i) out[i] = (uint8_t)(data[i] ^ rc.next());
+    return len > 0;
+}
+
+bool rr3TextIsPlain(const uint8_t* data, size_t len) {
+    // gametext.txt in the clear starts with its first key; a language file
+    // with a UTF-8 byte order mark or plain text
+    if (len >= 9 && !memcmp(data, "GAMETEXT_", 9)) return true;
+    if (len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) return true;
+    size_t n = std::min(len, (size_t)256), bad = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (data[i] < 9 || (data[i] > 13 && data[i] < 32)) ++bad;
+    return n > 0 && bad == 0;
+}
+
+// Kept for older menus and scripts: nothing has to be learned any more.
+bool nctLearnPad(const std::vector<Bytes>&, std::string& report) {
+    report = "Nothing to learn: the tool now has Real Racing 3's real .nct cipher "
+             "(RC4, read out of libRealRacing3.so) and decodes every file in full.";
+    return true;
+}
+bool nctLearnPad(const std::vector<Bytes>& files, const std::vector<std::string>&,
+                 std::string& report, bool) {
+    return nctLearnPad(files, report);
+}
+bool nctPadSave(const std::string&) { return false; }
+bool nctPadLoad(const std::string&) { return false; }
+
+namespace {
 
 bool pathChar(uint8_t c) {
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '/' ||
            c == '.' || c == '-' || (c >= 'A' && c <= 'Z');
 }
 
-// A liveries file, as far as its layout is known:
-//
-//     u32  ?            (differs per car)
-//     the car's name    (no length, no terminator - "1969_nissan_z_432")
-//     a few bytes       (a count; not needed here)
-//     records:  u32 texture id, u32 length, that many characters
-//
-// and every one of those strings is a texture path ending ".ptc.pvr.z". The
-// walk below uses nothing else: it finds where a record's string must end so
-// that it ends in ".ptc.pvr.z" and the next record's zero bytes line up, and
-// votes for what that says - the zeros, the length byte, the tail - and for
-// the path's opening when it matches the car's own name.
-void walkLiveries(const Bytes& f, const std::string& stem, const std::vector<uint8_t>& pad,
-                  const std::vector<uint8_t>& trusted, PadVotes& V, size_t* records) {
-    auto known = [&](size_t i) { return i < trusted.size() && trusted[i]; };
-    static const char kTail[] = ".ptc.pvr.z";
-    const size_t T = 10;
-    auto P = [&](size_t i) -> uint8_t { return i < pad.size() ? (uint8_t)(f[i] ^ pad[i]) : 0; };
-    auto zeros = [&](size_t q) {
-        if (q + 8 > f.size()) return 2.5f;
-        int z = 0;
-        for (size_t k : {2, 3, 5, 6, 7}) if (P(q + k) == 0) ++z;
-        return (float)z;
-    };
-    size_t q = 4 + stem.size();
-    float bestZ = -1; size_t start = q;
-    for (size_t s = q; s < q + 12 && s + 8 <= f.size(); ++s) {
-        float z = zeros(s);
-        if (z > bestZ) { bestZ = z; start = s; }
-    }
-    q = start;
-    while (q + 8 + T < f.size()) {
-        float bestScore = -1; size_t bestLen = 0; int bestTail = 0;
-        for (size_t ln = T + 1; ln < 96 && q + 8 + ln <= f.size(); ++ln) {
-            size_t e = q + 8 + ln;
-            int tail = 0;
-            for (size_t k = 0; k < T; ++k) if (P(e - T + k) == (uint8_t)kTail[k]) ++tail;
-            int chars = 0;
-            for (size_t k = q + 8; k < e - T; ++k) if (pathChar(P(k))) ++chars;
-            float score = tail * 2.0f + zeros(e) * 1.5f + (P(q + 4) == ln ? 4.0f : 0.0f) +
-                          3.0f * chars / (float)(ln - T);
-            if (score > bestScore) { bestScore = score; bestLen = ln; bestTail = tail; }
-        }
-        // Verified: the string ends in ".ptc.pvr.z" where the length says.
-        // Otherwise, when the length byte itself is already trusted (another
-        // car's name covers that offset), take it on its word and cast the
-        // same votes at a lower weight: this is how the walk gets past the
-        // first record before anything further in is known. A wrong guess
-        // here implies a different pad value in every file and is outvoted;
-        // a right one implies the same value every time and adds up.
-        float wgt = 2.0f;
-        if (bestScore < 16.0f || bestTail < 5) {
-            uint8_t ln = P(q + 4);
-            if (!known(q + 4) || ln <= T || ln >= 96 || q + 8 + ln > f.size()) break;
-            int hdrZeros = 0, hdrKnown = 0;
-            for (size_t k : {2, 3, 5, 6, 7})
-                if (known(q + k)) { ++hdrKnown; if (P(q + k) == 0) ++hdrZeros; }
-            if (hdrZeros < hdrKnown) break;
-            bestLen = ln;
-            wgt = 0.7f;
-        }
-        size_t e = q + 8 + bestLen;
-        for (size_t k : {2, 3, 5, 6, 7}) V.add(f, q + k, 0, wgt);
-        V.add(f, q + 4, (uint8_t)bestLen, wgt);
-        for (size_t k = 0; k < T; ++k) V.add(f, e - T + k, (uint8_t)kTail[k], wgt);
-        // the path's opening, when it is one the game uses and this car's own
-        size_t bodyLen = bestLen - T;
-        for (const std::string& pre : { "livery/" + stem + "_ext_", "livery/" + stem,
-                                        stem + "_", std::string("common/car_"),
-                                        std::string("common/"), std::string("vehicle/") }) {
-            if (pre.size() > bodyLen) continue;
-            size_t agree = 0;
-            for (size_t k = 0; k < pre.size(); ++k) if (P(q + 8 + k) == (uint8_t)pre[k]) ++agree;
-            if (agree >= 4 && agree * 10 >= pre.size() * 7) {
-                for (size_t k = 0; k < pre.size(); ++k) V.add(f, q + 8 + k, (uint8_t)pre[k], 1.5f);
-                break;
-            }
-            // unverifiable yet: a faint vote for each opening the game uses,
-            // which only counts once other files have said the same
-            size_t unknownHere = 0;
-            for (size_t k = 0; k < pre.size(); ++k) if (!known(q + 8 + k)) ++unknownHere;
-            if (unknownHere * 2 > pre.size())
-                for (size_t k = 0; k < pre.size(); ++k) V.add(f, q + 8 + k, (uint8_t)pre[k], 0.3f);
-        }
-        if (records) ++*records;
-        q = e;
-    }
-}
-
-} // namespace
-
-bool nctLearnPad(const std::vector<Bytes>& files, std::string& report) {
-    return nctLearnPad(files, std::vector<std::string>(), report);
-}
-
-bool nctLearnPad(const std::vector<Bytes>& files, const std::vector<std::string>& names,
-                 std::string& report, bool useShipped) {
-    report.clear();
-    size_t usable = 0, longest = 0;
-    std::vector<size_t> sizes;
-    for (const Bytes& f : files) {
-        if (f.size() < 16) continue;
-        ++usable;
-        sizes.push_back(f.size());
-    }
-    // Only offsets that several files reach can be voted on. One 14 MB
-    // events table would otherwise ask for 14 GB of vote counters (the crash
-    // behind "Finish the .nct pad"): the pad is learned as far as the eighth
-    // longest file reaches, and never past 1 MB.
-    if (!sizes.empty()) {
-        std::sort(sizes.begin(), sizes.end(), std::greater<size_t>());
-        longest = std::min<size_t>(sizes[std::min<size_t>(7, sizes.size() - 1)], (size_t)1 << 20);
-    }
-    if (usable < 8 || !longest) {
-        report = "Not enough .nct / .gui files to work from - at least eight are "
-                 "needed, and a whole game holds one per car.";
-        return false;
-    }
-    bool named = names.size() == files.size();
-    auto nameOf = [&](size_t k) { return named ? baseName(names[k]) : std::string(); };
-
-    // The shipped pins count, but for less than a car's own name or a
-    // verified record: some of them came from crib dragging on only twelve
-    // files, and the structure of a whole game is the better witness.
-    const float kShippedWeight = 1.2f;
-
-    // ---- the evidence that does not depend on the pad ----
-    PadVotes base(longest);
-    // 1. what the shipped pad already pins from plaintext
-    if (useShipped)
-        for (size_t i = 0; i < longest && i < kNctPadLen; ++i)
-            if ((kNctPadSure[i >> 3] >> (i & 7)) & 1) base.w[i][kNctPad[i]] += kShippedWeight;
-    // 2. struct padding: in the per-car data files (not the liveries lists,
-    //    not the .gui XML) the commonest ciphertext byte is the pad itself.
-    //    Unanimous offsets are left out - padding and a shared constant look
-    //    alike there - and so are offsets too few files reach.
-    for (size_t i = 0; i < longest; ++i) {
-        int count[256] = {0}, total = 0;
-        for (size_t k = 0; k < files.size(); ++k) {
-            const Bytes& f = files[k];
-            if (i >= f.size() || f.size() < 16) continue;
-            std::string n = nameOf(k);
-            if (named && (endsWith(n, ".gui") || n.find(".liveries.") != std::string::npos))
-                continue;
-            ++count[f[i]]; ++total;
-        }
-        if (total < 5) continue;
-        int b = 0, bn = 0, sn = 0;
-        for (int v = 0; v < 256; ++v) {
-            if (count[v] > bn) { sn = bn; bn = count[v]; b = v; }
-            else if (count[v] > sn) sn = count[v];
-        }
-        if (bn * 2 > total && bn >= sn * 2 && bn + 2 < total)
-            base.w[i][b] += std::min(6.0f, 0.8f * (bn - 1));
-    }
-    // 3. the car's own name, which a liveries file carries at byte 4, and a
-    //    car file's model year at byte 12 (its name starts "107_2005_...")
-    for (size_t k = 0; k < files.size() && named; ++k) {
-        std::string n = nameOf(k), stem = nctStem(n);
-        const Bytes& f = files[k];
-        if (n.find(".liveries.") != std::string::npos) {
-            for (size_t c = 0; c < stem.size(); ++c) base.add(f, 4 + c, (uint8_t)stem[c], 5.0f);
-            for (size_t c = 1; c < 4; ++c) base.add(f, c, 0, 1.0f);
-        } else if (endsWith(n, ".bin.nct")) {
-            size_t u = stem.find('_');
-            if (u != std::string::npos && u + 5 <= stem.size()) {
-                std::string year = stem.substr(u + 1, 4);
-                bool digits = true;
-                for (char c : year) if (c < '0' || c > '9') digits = false;
-                if (digits)
-                    for (size_t c = 0; c < 4; ++c) base.add(f, 12 + c, (uint8_t)year[c], 3.0f);
-            }
-        } else if (endsWith(n, ".gui")) {
-            static const char kXml[] = "<?xml version=\"1.0\" encoding=\"utf-8\"?>";
-            for (size_t c = 0; c + 1 < sizeof(kXml); ++c) base.add(f, c, (uint8_t)kXml[c], 1.0f);
-        }
-    }
-
-    // 4. the .gui files are XML: text, all of it. At an offset several of them
-    //    reach, only one pad byte turns every one of them into characters
-    //    that XML is made of; a byte that makes one of them a control code
-    //    is out. Scored with how common each character is in these files, so
-    //    that between two all-text readings the likelier one wins.
-    if (named) {
-        std::vector<size_t> gui;
-        for (size_t k = 0; k < files.size(); ++k)
-            if (endsWith(nameOf(k), ".gui")) gui.push_back(k);
-        static float logp[256];
-        static bool init = false;
-        if (!init) {
-            for (int c = 0; c < 256; ++c) logp[c] = -30.0f;           // impossible
-            for (int c = 0x20; c < 0x7F; ++c) logp[c] = -6.0f;       // any printable
-            for (const char* p = "abcdefghijklmnopqrstuvwxyz"; *p; ++p) logp[(uint8_t)*p] = -3.2f;
-            for (const char* p = "etaoinsrl_"; *p; ++p) logp[(uint8_t)*p] = -2.6f;
-            for (const char* p = "0123456789"; *p; ++p) logp[(uint8_t)*p] = -3.5f;
-            for (const char* p = "\"= </>\t\n"; *p; ++p) logp[(uint8_t)*p] = -2.4f;
-            logp['\r'] = -4.0f;
-            for (const char* p = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; *p; ++p) logp[(uint8_t)*p] = -4.2f;
-            init = true;
-        }
-        for (size_t i = 0; i < longest && gui.size() >= 6; ++i) {
-            size_t reach = 0;
-            for (size_t k : gui) if (i < files[k].size()) ++reach;
-            if (reach < 6) continue;
-            float best = -1e30f, second = -1e30f; int bestB = -1;
-            for (int b = 0; b < 256; ++b) {
-                float sc = 0;
-                for (size_t k : gui)
-                    if (i < files[k].size()) sc += logp[files[k][i] ^ b];
-                if (sc > best) { second = best; best = sc; bestB = b; }
-                else if (sc > second) second = sc;
-            }
-            // every file text, and clearly ahead of the runner-up
-            if (bestB >= 0 && best > -6.5f * reach && best - second >= 3.0f)
-                base.w[i][bestB] += std::min(4.0f, 1.0f + 0.1f * reach);
-        }
-    }
-
-    // ---- then the structure, walked with the pad as it stands, repeatedly ----
-    std::vector<uint8_t> pad(longest, 0);
-    for (size_t i = 0; i < longest; ++i) {
-        int b = base.best(i);
-        uint8_t shipped = 0;
-        if (b >= 0) pad[i] = (uint8_t)b;
-        else if (useShipped && padAt(i, shipped)) pad[i] = shipped;
-    }
-    PadVotes V = base;
-    size_t records = 0;
-    auto trustedFrom = [&](const PadVotes& src) {
-        std::vector<uint8_t> t(longest, 0);
-        for (size_t i = 0; i < longest; ++i) {
-            float top = 0, second = 0;
-            if (src.best(i, &top, &second) >= 0 && top >= 2.0f && top >= 2.0f * second) t[i] = 1;
-        }
-        return t;
-    };
-    std::vector<uint8_t> trusted = trustedFrom(base);
-    for (int round = 0; round < 24 && named; ++round) {
-        V = base;
-        records = 0;
-        for (size_t k = 0; k < files.size(); ++k) {
-            std::string n = nameOf(k);
-            if (n.find(".liveries.") == std::string::npos) continue;
-            walkLiveries(files[k], nctStem(n), pad, trusted, V, &records);
-        }
-        trusted = trustedFrom(V);
-        size_t changed = 0;
-        for (size_t i = 0; i < longest; ++i) {
-            int b = V.best(i);
-            if (b >= 0 && (uint8_t)b != pad[i]) { pad[i] = (uint8_t)b; ++changed; }
-        }
-        if (!changed) break;
-    }
-
-    // ---- what is trusted ----
-    std::vector<uint8_t> sure(longest, 0);
-    size_t checked = 0, agreed = 0;
-    for (size_t i = 0; i < longest; ++i) {
-        float top = 0, second = 0;
-        int b = V.best(i, &top, &second);
-        if (b < 0) continue;
-        if (top >= 2.0f && top >= 2.0f * second) sure[i] = 1;
-        // the scoreboard: bytes the shipped pad pins, against what the files
-        // say without that pin's own vote
-        if (useShipped && i < kNctPadLen && ((kNctPadSure[i >> 3] >> (i & 7)) & 1)) {
-            std::array<float, 256> w = V.w[i];
-            w[kNctPad[i]] -= kShippedWeight;
-            int alt = -1; float t = 0;
-            for (int v = 0; v < 256; ++v) if (w[v] > t) { t = w[v]; alt = v; }
-            if (alt >= 0 && t >= 2.0f) { ++checked; if ((uint8_t)alt == kNctPad[i]) ++agreed; }
-        }
-    }
-    double rate = checked ? (100.0 * agreed / checked) : -1.0;
-    char buf[800];
-    if (checked >= 20 && rate < 80.0) {
-        snprintf(buf, sizeof(buf),
-                 "Read %u file(s), but what they say disagrees with the bytes "
-                 "already known from plaintext (%.0f%% agreement on %u of them). "
-                 "Nothing was changed.", (unsigned)usable, rate, (unsigned)checked);
-        report = buf;
-        return false;
-    }
-    size_t before = nctPadKnownBytes(), beforeLen = nctPadLength();
-    g_ignoreShipped = !useShipped;
-    g_padLearned.swap(pad);
-    g_padLearnedSure.swap(sure);
-    size_t known = nctPadKnownBytes();
-
-    int n = snprintf(buf, sizeof(buf),
-                     "Read %u file(s)%s.\n\nThe pad now runs %u bytes, of which %u are "
-                     "known - it was %u of %u.",
-                     (unsigned)usable, named ? "" : " (without their names)",
-                     (unsigned)longest, (unsigned)known, (unsigned)before, (unsigned)beforeLen);
-    if (records && n > 0 && (size_t)n < sizeof(buf))
-        n += snprintf(buf + n, sizeof(buf) - n,
-                      "\n\n%u livery record(s) were walked end to end.", (unsigned)records);
-    if (rate >= 0 && n > 0 && (size_t)n < sizeof(buf))
-        snprintf(buf + n, sizeof(buf) - n,
-                 "\n\nChecked against the bytes already pinned by known plaintext, "
-                 "the files agreed on %.0f%% of %u.", rate, (unsigned)checked);
-    report = buf;
-    return true;
-}
-
-bool nctPadSave(const std::string& path) {
-    if (g_padLearned.empty()) return false;
-    Bytes out;
-    out.reserve(8 + g_padLearned.size() * 2);
-    const char* magic = "MTNCTPAD";
-    out.insert(out.end(), magic, magic + 8);
-    uint32_t n = (uint32_t)g_padLearned.size();
-    for (int i = 0; i < 4; ++i) out.push_back((uint8_t)(n >> (8 * i)));
-    out.insert(out.end(), g_padLearned.begin(), g_padLearned.end());
-    out.insert(out.end(), g_padLearnedSure.begin(), g_padLearnedSure.end());
-    return writeFile(path, out);
-}
-
-bool nctPadLoad(const std::string& path) {
-    Bytes in;
-    if (!readFile(path, in) || in.size() < 12 || memcmp(in.data(), "MTNCTPAD", 8) != 0)
-        return false;
-    uint32_t n = rd32(in.data() + 8);
-    if (!n || in.size() < 12 + (size_t)n * 2) return false;
-    g_padLearned.assign(in.begin() + 12, in.begin() + 12 + n);
-    g_padLearnedSure.assign(in.begin() + 12 + n, in.begin() + 12 + n * 2);
-    return true;
-}
-
-namespace {
-
-// How much of a file the pad is certain for, as a line for the text views.
-std::string padCoverageLine(size_t len, size_t covered) {
-    size_t sure = 0;
-    for (size_t i = 0; i < len && i < covered; ++i) if (nctPadSure(i)) ++sure;
-    char buf[320];
-    snprintf(buf, sizeof(buf),
-             "Pad: %u of this file's %u bytes are decoded, %u of them certain (%u%%).%s\r\n",
-             (unsigned)covered, (unsigned)len, (unsigned)sure,
-             (unsigned)(len ? sure * 100 / len : 0),
-             sure < len ? " A '?' marks text that runs over an uncertain byte." : "");
+std::string padCoverageLine(size_t len, size_t) {
+    char buf[160];
+    snprintf(buf, sizeof(buf), "Decoded in full (%u bytes, the game's RC4 stream).\r\n", (unsigned)len);
     return buf;
 }
 
-bool rangeSure(size_t from, size_t to) {
-    for (size_t k = from; k < to; ++k) if (!nctPadSure(k)) return false;
-    return true;
-}
+bool rangeSure(size_t, size_t) { return true; }
 
 std::string printable(const uint8_t* p, size_t n) {
     std::string v;
@@ -1263,11 +1000,7 @@ bool nctEncode(const uint8_t* plain, size_t len, Bytes& out,
     size_t covered = 0;
     nctTransform(plain, len, out, &covered);     // the XOR is its own inverse
     if (pastPad) *pastPad = len - std::min(len, covered);
-    if (uncertain) {
-        size_t n = 0;
-        for (size_t i = 0; i < covered; ++i) if (!nctPadSure(i)) ++n;
-        *uncertain = n;
-    }
+    if (uncertain) *uncertain = 0;
     return covered == len;
 }
 
@@ -1977,15 +1710,17 @@ Model loadJsr184(const uint8_t* data, size_t len, bool flipV) {
             if (vr.bad) normals.clear();
         }
 
-        // first texture coordinate set
+        // texture coordinate sets: the first for the textures, the second
+        // (tracks) for the baked lighting
+        auto readSet = [&](size_t set) {
         std::vector<float> uvs;
-        if (!vb.texcoords.empty()) {
-            uint32_t tcIndex = vb.texcoords[0];
+        if (vb.texcoords.size() > set) {
+            uint32_t tcIndex = vb.texcoords[set];
             if (tcIndex && tcIndex < arrays.size() && arrays[tcIndex].count == pa.count) {
                 const VArray& ta = arrays[tcIndex];
-                float ts = vb.tcScale.empty() ? 1.0f : vb.tcScale[0];
-                float tb0 = vb.tcBias.size() > 0 ? vb.tcBias[0] : 0.0f;
-                float tb1 = vb.tcBias.size() > 1 ? vb.tcBias[1] : 0.0f;
+                float ts = vb.tcScale.size() > set ? vb.tcScale[set] : 1.0f;
+                float tb0 = vb.tcBias.size() > set * 3 + 0 ? vb.tcBias[set * 3 + 0] : 0.0f;
+                float tb1 = vb.tcBias.size() > set * 3 + 1 ? vb.tcBias[set * 3 + 1] : 0.0f;
                 // The scale the vertex buffer states is four times the real
                 // one, and this correction is applied exactly once. Measured
                 // rather than assumed: every model checked states 1/512, while
@@ -2023,6 +1758,10 @@ Model loadJsr184(const uint8_t* data, size_t len, bool flipV) {
                 if (vr.bad) uvs.clear();
             }
         }
+        return uvs;
+        };
+        std::vector<float> uvs = readSet(0);
+        std::vector<float> uvs2 = readSet(1);
 
         // per-vertex colour: JSR-184 keeps it as unsigned bytes, RGB or RGBA
         std::vector<float> colors;
@@ -2067,6 +1806,7 @@ Model loadJsr184(const uint8_t* data, size_t len, bool flipV) {
         mesh.positions = std::move(positions);
         mesh.normals = std::move(normals);
         mesh.uvs = std::move(uvs);
+        mesh.uvs2 = std::move(uvs2);
         mesh.colors = std::move(colors);
         // drop anything that points outside the buffer rather than crashing
         uint32_t vcount = (uint32_t)(mesh.positions.size() / 3);
@@ -2177,11 +1917,27 @@ namespace {
 // names make this unambiguous; nothing here is a guess about geometry.
 struct PlacementRule { const char* meshContains; const char* pointName; };
 
+// First match whose point the car has wins, so a name may be listed more
+// than once, best point first.
 const PlacementRule kRules[] = {
-    { "STEERING_WHEEL",  "POINT_STEERING_WHEEL" },
-    { "HAND_STEER",      "POINT_STEERING_WHEEL" },
+    // A needle turns on its HINGE_NEEDLE_*: the dial's centre, with the
+    // dial face's tilt (the Megane's speedometer leans back 29 degrees).
+    // POINT_NEEDLE_*_1, _2, _3 are marks round the dial's edge - _1 the zero
+    // at the lower left, _3 the top of the scale - where the needle points,
+    // not where it turns. The needles on a steering wheel's own display
+    // have hinges of their own.
+    { "STEERING_WHEEL_NEEDLE_SPEED", "HINGE_STEERING_WHEEL_NEEDLE_SPEED" },
+    { "STEERING_WHEEL_NEEDLE_SPEED", "POINT_STEERING_WHEEL_NEEDLE_SPEED" },
+    { "STEERING_WHEEL_NEEDLE_RPM",   "HINGE_STEERING_WHEEL_NEEDLE_RPM"   },
+    { "STEERING_WHEEL_NEEDLE_RPM",   "POINT_STEERING_WHEEL_NEEDLE_RPM"   },
+    { "NEEDLE_RPM",      "HINGE_NEEDLE_RPM"     },
+    { "NEEDLE_RPM",      "POINT_NEEDLE_RPM"     },
+    { "NEEDLE_SPEED",    "HINGE_NEEDLE_SPEED"   },
+    { "NEEDLE_SPEED",    "POINT_NEEDLE_SPEED"   },
     { "NEEDLE_RPM",      "POINT_NEEDLE_RPM_1"   },
     { "NEEDLE_SPEED",    "POINT_NEEDLE_SPEED_1" },
+    { "STEERING_WHEEL",  "POINT_STEERING_WHEEL" },
+    { "HAND_STEER",      "POINT_STEERING_WHEEL" },
     // Both arms are modelled around the steering wheel: on the 935 they
     // are mirror images at x = +-0.18, which is the rim's own radius, and
     // reach back 0.5 towards the seat. HAND_GEAR is the right arm while it is
@@ -2195,8 +1951,6 @@ const PlacementRule kRules[] = {
     { "WHEEL_STEER",     "POINT_STEERING_WHEEL" },
     { "STEERING",        "POINT_STEERING_WHEEL" },
     { "SHIFTER",         "POINT_GEARSTICK"      },
-    { "NEEDLE_SPEED",    "POINT_NEEDLE_SPEED"   },
-    { "NEEDLE_RPM",      "POINT_NEEDLE_RPM"     },
     { "GEARSTICK",       "POINT_GEARSTICK"      },
     { "GEAR_STICK",      "POINT_GEARSTICK"      },
 };
@@ -2231,16 +1985,236 @@ void rr3MergeCockpitPoints(std::vector<Hardpoint>& exterior, const std::vector<H
     }
     // a cockpit that spells its steering point differently
     // (POINT_STEERINGWHEEL, POINT_STEERING_WHEEL_1, ...)
-    if (!findPoint(exterior, "POINT_STEERING_WHEEL"))
+    // (HINGE_STEERING_WHEEL, POINT_STEERINGWHEEL, ...) - never a steering
+    // strut or arm of the suspension (the F1 cars have those)
+    if (!findPoint(exterior, "POINT_STEERING_WHEEL")) {
+        const Hardpoint* best = nullptr;
+        int bestRank = 0;
         for (const Hardpoint& h : interior) {
             std::string up = h.name;
             for (char& c : up) if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
             if (up.find("STEER") == std::string::npos) continue;
-            Hardpoint sw = h;
+            if (up.find("STRUT") != std::string::npos || up.find("ARM") != std::string::npos ||
+                up.find("PIVOT") != std::string::npos || up.find("ANCHOR") != std::string::npos)
+                continue;
+            int rank = (up.find("STEERING_WHEEL") != std::string::npos ||
+                        up.find("STEERINGWHEEL") != std::string::npos) ? 2 : 1;
+            if (rank > bestRank) { best = &h; bestRank = rank; }
+        }
+        if (best) {
+            Hardpoint sw = *best;
             sw.name = "POINT_STEERING_WHEEL";
             exterior.push_back(sw);
-            break;
         }
+    }
+}
+
+namespace {
+
+bool isSteeringWheelMesh(const std::string& name) {
+    std::string up = name;
+    for (char& c : up) if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    if (up.find("HAND") != std::string::npos || up.find("ARM_") != std::string::npos) return false;
+    return up.find("STEERING_WHEEL") != std::string::npos || up.find("STEERINGWHEEL") != std::string::npos ||
+           up.find("STEER_WHEEL") != std::string::npos || up.find("WHEEL_STEER") != std::string::npos;
+}
+
+// the box round the steering wheel's meshes of one LOD
+bool steeringBox(const Model& m, const std::string& lod, float lo[3], float hi[3]) {
+    bool any = false;
+    for (const Mesh& me : m.meshes) {
+        if (me.lod != lod || !isSteeringWheelMesh(me.name) || me.positions.empty()) continue;
+        for (int c = 0; c < 3; ++c) {
+            lo[c] = any ? std::min(lo[c], me.bboxMin[c]) : me.bboxMin[c];
+            hi[c] = any ? std::max(hi[c], me.bboxMax[c]) : me.bboxMax[c];
+        }
+        any = true;
+    }
+    return any;
+}
+
+// The wheel sits on its column. A steering point (or the cockpit wheel it was
+// lined up with) can leave the rim floating behind the column or the dash:
+// the Megane Trophy-R's outside wheel hung 7-12 cm short of its dash. Along
+// the car's forward line (-z) through the hub, find the nearest part of the
+// cab ahead of the hub and slide the wheel onto it - never more than 15 cm,
+// never backwards, and not at all when nothing of the cab is on the line.
+int dockSteering(Model& m, float* shiftCm) {
+    const float kR = 0.06f, kReach = 0.20f, kMax = 0.15f;
+    std::vector<std::string> lods;
+    for (const Mesh& me : m.meshes)
+        if (isSteeringWheelMesh(me.name) && std::find(lods.begin(), lods.end(), me.lod) == lods.end())
+            lods.push_back(me.lod);
+    int moved = 0;
+    for (const std::string& lod : lods) {
+        float lo[3], hi[3];
+        if (!steeringBox(m, lod, lo, hi)) continue;
+        float cx = (lo[0] + hi[0]) * 0.5f, cy = (lo[1] + hi[1]) * 0.5f;
+        // the hub's front: the wheel's own vertices on the line
+        bool hubAny = false;
+        float hub = 0;
+        for (const Mesh& me : m.meshes) {
+            if (me.lod != lod || !isSteeringWheelMesh(me.name)) continue;
+            for (size_t i = 0; i + 2 < me.positions.size(); i += 3) {
+                float dx = me.positions[i] - cx, dy = me.positions[i + 1] - cy;
+                if (dx * dx + dy * dy > kR * kR) continue;
+                float z = me.positions[i + 2];
+                if (!hubAny || z < hub) hub = z;
+                hubAny = true;
+            }
+        }
+        if (!hubAny) hub = lo[2];
+        // the cab's nearest vertex ahead of it
+        bool cabAny = false;
+        float cab = 0;
+        for (const Mesh& me : m.meshes) {
+            if (me.lod != lod || isSteeringWheelMesh(me.name) || me.positions.empty()) continue;
+            std::string up = me.name + " " + me.material;
+            for (char& c : up) if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+            bool skip = false;
+            for (const char* k : { "HAND", "ARM_", "GLASS", "WINDOW", "DOOR", "DRIVER", "HELMET", "HELPER",
+                                   "COLLISION", "SHADOW", "NEEDLE", "_MM_EXT", "STEER" })
+                if (up.find(k) != std::string::npos) { skip = true; break; }
+            if (skip) continue;
+            if (me.bboxMax[2] < hub - kReach || me.bboxMin[2] > hub + 0.01f) continue;
+            for (size_t i = 0; i + 2 < me.positions.size(); i += 3) {
+                float z = me.positions[i + 2];
+                if (z > hub + 0.01f || z < hub - kReach) continue;
+                float dx = me.positions[i] - cx, dy = me.positions[i + 1] - cy;
+                if (dx * dx + dy * dy > kR * kR) continue;
+                if (!cabAny || z > cab) cab = z;
+                cabAny = true;
+            }
+        }
+        if (!cabAny) continue;
+        float gap = hub - cab;
+        if (gap < 0.01f || gap > kMax) continue;
+        float t[3] = { 0, 0, -gap };
+        for (Mesh& me : m.meshes)
+            if (me.lod == lod && isSteeringWheelMesh(me.name)) { translateMeshBy(me, t); ++moved; }
+        if (shiftCm) *shiftCm = std::max(*shiftCm, gap * 100.0f);
+    }
+    return moved;
+}
+
+} // namespace
+
+std::string rr3InteriorModelNameFor(const std::string& modelPath) {
+    std::string p = rr3InteriorPointsNameFor(modelPath);
+    if (p.size() < 11) return std::string();
+    return p.substr(0, p.size() - 7) + "_a.m3g";             // <car>_int_a.m3g
+}
+
+int rr3BakeCockpitLight(Model& m, const uint8_t* bin, size_t len) {
+    std::vector<Bytes> frames;
+    if (!bin || !len || !rr3BinFrames(bin, len, frames, 0x7fffffff) || frames.empty()) return 0;
+    std::vector<float> acc;
+    int w = 0, h = 0, n = 0;
+    for (const Bytes& f : frames) {
+        Image im;
+        if (!decodeTextureFile(f.data(), f.size(), im) || !im.ok()) continue;
+        if (!w) { w = im.width; h = im.height; acc.assign((size_t)w * h, 0.0f); }
+        if (im.width != w || im.height != h) continue;
+        int ch = im.channels;
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            const uint8_t* p = &im.pixels[i * ch];
+            acc[i] += ch >= 3 ? (p[0] + p[1] + p[2]) / (3.0f * 255.0f) : p[0] / 255.0f;
+        }
+        ++n;
+    }
+    if (!n) return 0;
+    for (float& a : acc) a /= (float)n;
+    // bilinear, the same texel convention the viewers sample textures with
+    auto at = [&](float u, float v) {
+        u -= std::floor(u);
+        v -= std::floor(v);
+        float x = u * w - 0.5f, y = (1.0f - v) * h - 0.5f;
+        int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
+        float fx = x - x0, fy = y - y0;
+        auto px = [&](int xx, int yy) {
+            xx = std::max(0, std::min(w - 1, xx));
+            yy = std::max(0, std::min(h - 1, yy));
+            return acc[(size_t)yy * w + xx];
+        };
+        return (px(x0, y0) * (1 - fx) + px(x0 + 1, y0) * fx) * (1 - fy) +
+               (px(x0, y0 + 1) * (1 - fx) + px(x0 + 1, y0 + 1) * fx) * fy;
+    };
+    int lit = 0;
+    for (Mesh& me : m.meshes) {
+        size_t nv = me.positions.size() / 3;
+        if (!nv || me.uvs2.size() != nv * 2) continue;
+        std::string up = me.name + " " + me.material;
+        for (char& c : up) if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        // the cockpit's own parts; glass and lit parts keep their look
+        if (up.find("_INT_") == std::string::npos && up.find("INTERIOR") == std::string::npos) continue;
+        if (up.find("GLASS") != std::string::npos || up.find("WINDOW") != std::string::npos ||
+            up.find("EMISSIVE") != std::string::npos || up.find("LED") != std::string::npos) continue;
+        // The cockpit model's view of the outside - bonnet, doors, mirrors,
+        // the body round the windscreen - is paint: the game lights it with
+        // the sun, and the averaged sun shadows smeared it (the F12tdf's
+        // bonnet in its _int_b)
+        for (const char* k : { "_MM_EXT", "_MM_CHASSIS", "_MM_BADGES", "_MM_LIGHTS", "_MM_MISC" })
+            if (up.find(k) != std::string::npos) { me.light.clear(); goto nextMesh; }
+        me.light.resize(nv);
+        // a closed cabin sees little sky: the cockpit's own lamps and the
+        // light bounced round it are the floor under the occlusion
+        for (size_t i = 0; i < nv; ++i)
+            me.light[i] = 0.38f + 0.62f * at(me.uvs2[i * 2], me.uvs2[i * 2 + 1]);
+        ++lit;
+    nextMesh:;
+    }
+    return lit;
+}
+
+bool rr3CockpitWheelCentre(const uint8_t* m3g, size_t len, const std::vector<Hardpoint>& cockpitPoints,
+                           float centre[3]) {
+    if (!m3g || !len || cockpitPoints.empty()) return false;
+    Model cockpit = loadModel(m3g, len);
+    if (!cockpit.valid) return false;
+    std::vector<Hardpoint> pts;
+    rr3MergeCockpitPoints(pts, cockpitPoints);
+    if (!findPoint(pts, "POINT_STEERING_WHEEL")) return false;
+    rr3PlaceParts(cockpit, pts);
+    // the most detailed LOD that has a wheel
+    std::string lod;
+    for (const Mesh& me : cockpit.meshes)
+        if (isSteeringWheelMesh(me.name) && (lod.empty() || me.lod < lod)) lod = me.lod;
+    float lo[3], hi[3];
+    if (!steeringBox(cockpit, lod, lo, hi)) return false;
+    for (int c = 0; c < 3; ++c) centre[c] = (lo[c] + hi[c]) * 0.5f;
+    return true;
+}
+
+int rr3AlignSteering(Model& m, const float centre[3], float* shiftCm) {
+    if (shiftCm) *shiftCm = 0;
+    std::vector<std::string> lods;
+    for (const Mesh& me : m.meshes)
+        if (isSteeringWheelMesh(me.name) && std::find(lods.begin(), lods.end(), me.lod) == lods.end())
+            lods.push_back(me.lod);
+    int moved = 0;
+    for (const std::string& lod : lods) {
+        float lo[3], hi[3];
+        if (!steeringBox(m, lod, lo, hi)) continue;
+        float t[3], d = 0;
+        for (int c = 0; c < 3; ++c) { t[c] = centre[c] - (lo[c] + hi[c]) * 0.5f; d += t[c] * t[c]; }
+        // a wheel this far off was not on the steering point to begin with:
+        // the cockpit's wheel says nothing about it
+        if (d > 0.30f * 0.30f || d < 1e-8f) continue;
+        for (Mesh& me : m.meshes)
+            if (me.lod == lod && isSteeringWheelMesh(me.name)) { translateMeshBy(me, t); ++moved; }
+        if (shiftCm) *shiftCm = std::max(*shiftCm, std::sqrt(d) * 100.0f);
+    }
+    // the cockpit's wheel gave the line; this model's own cab decides how far
+    // forward it sits
+    // (the cockpit's own wheel is never moved: it sits on its point, in the
+    // driver's hands)
+    float dockCm = 0;
+    if (moved && dockSteering(m, &dockCm)) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "steering wheel slid %.1f cm forward onto its column", dockCm);
+        m.warnings.push_back(buf);
+    }
+    return moved;
 }
 
 std::string rr3InteriorPointsNameFor(const std::string& modelPath) {
@@ -2267,6 +2241,13 @@ void rr3PlaceParts(Model& m, const std::vector<Hardpoint>& given) {
     // apart - which beats leaving the wheel under the floor at the origin.
     std::vector<Hardpoint> points = given;
     bool fromDriver = false;
+    // a cockpit's own file may name the wheel's place HINGE_STEERING_WHEEL
+    // (the Taycan, the F1 cars): the same place, with the wheel's rake
+    if (!findPoint(points, "POINT_STEERING_WHEEL")) {
+        std::vector<Hardpoint> merged;
+        rr3MergeCockpitPoints(merged, given);
+        if (const Hardpoint* sw = findPoint(merged, "POINT_STEERING_WHEEL")) points.push_back(*sw);
+    }
     if (!findPoint(points, "POINT_STEERING_WHEEL")) {
         const Hardpoint* driver = findPoint(points, "POINT_DRIVER");
         if (driver) {
@@ -2278,7 +2259,7 @@ void rr3PlaceParts(Model& m, const std::vector<Hardpoint>& given) {
         }
     }
 
-    int moved = 0;
+    int moved = 0, turned = 0, zeroed = 0;
     std::vector<std::string> parked;
     for (Mesh& mesh : m.meshes) {
         std::string upper = mesh.name;
@@ -2303,8 +2284,48 @@ void rr3PlaceParts(Model& m, const std::vector<Hardpoint>& given) {
         float dx = c[0] - target->pos[0], dy = c[1] - target->pos[1], dz = c[2] - target->pos[2];
         float dP = std::sqrt(dx*dx + dy*dy + dz*dz);
         if (!(dO < dP)) continue;
+        float turn[9];
+        bool tilted = hingeTurn(*target, turn);
+        if (tilted) {
+            rotateMeshBy(mesh, turn);
+            ++turned;
+        }
         translateMeshBy(mesh, target->pos);
         ++moved;
+        // a needle on its hinge rests on the zero of its scale (_1)
+        if (target->name.rfind("HINGE_", 0) == 0 && upper.find("NEEDLE") != std::string::npos) {
+            std::string zero = "POINT" + target->name.substr(5) + "_1";
+            if (const Hardpoint* z = findPoint(points, zero)) {
+                float R[9];
+                if (!tilted) { for (int k = 0; k < 9; ++k) R[k] = (k % 4 == 0) ? 1.0f : 0.0f; }
+                else memcpy(R, turn, sizeof(R));
+                // the needle's tip direction and the dial's face, as placed
+                float tip[3] = { R[1], R[4], R[7] }, face[3] = { R[2], R[5], R[8] };
+                float want[3] = { z->pos[0] - target->pos[0], z->pos[1] - target->pos[1],
+                                  z->pos[2] - target->pos[2] };
+                float along = want[0] * face[0] + want[1] * face[1] + want[2] * face[2];
+                for (int k = 0; k < 3; ++k) want[k] -= along * face[k];
+                float wl = std::sqrt(want[0] * want[0] + want[1] * want[1] + want[2] * want[2]);
+                if (wl > 1e-6f) {
+                    float cosA = (tip[0] * want[0] + tip[1] * want[1] + tip[2] * want[2]) / wl;
+                    float cr[3] = { tip[1] * want[2] - tip[2] * want[1], tip[2] * want[0] - tip[0] * want[2],
+                                    tip[0] * want[1] - tip[1] * want[0] };
+                    float sinA = (cr[0] * face[0] + cr[1] * face[1] + cr[2] * face[2]) / wl;
+                    float a = std::atan2(sinA, cosA);
+                    // Rodrigues: a turn by a about the face's axis, about the pivot
+                    float c = std::cos(a), sn = std::sin(a), t = 1 - c;
+                    float x = face[0], y = face[1], zz = face[2];
+                    float Q[9] = { t * x * x + c,      t * x * y - sn * zz, t * x * zz + sn * y,
+                                   t * x * y + sn * zz, t * y * y + c,      t * y * zz - sn * x,
+                                   t * x * zz - sn * y, t * y * zz + sn * x, t * zz * zz + c };
+                    float back[3] = { -target->pos[0], -target->pos[1], -target->pos[2] };
+                    translateMeshBy(mesh, back);
+                    rotateMeshBy(mesh, Q);
+                    translateMeshBy(mesh, target->pos);
+                    ++zeroed;
+                }
+            }
+        }
         if (fromDriver && target->name == "POINT_STEERING_WHEEL") {
             m.warnings.push_back(mesh.name + " placed at POINT_DRIVER (no steering point in the "
                                  ".points files found)");
@@ -2315,6 +2336,15 @@ void rr3PlaceParts(Model& m, const std::vector<Hardpoint>& given) {
         char buf[96];
         snprintf(buf, sizeof(buf), "%d part(s) placed from the .points file", moved);
         m.warnings.push_back(buf);
+        if (turned) {
+            snprintf(buf, sizeof(buf), "%d part(s) tilted as their hinge states (steering wheel rake, dial faces)",
+                     turned);
+            m.warnings.push_back(buf);
+        }
+        if (zeroed) {
+            snprintf(buf, sizeof(buf), "%d needle(s) on their dial's centre, resting on the zero mark", zeroed);
+            m.warnings.push_back(buf);
+        }
     }
 
     // Real Racing 2 ships the wheel inside the car: MESH_WHEEL_HIGH,
@@ -2515,7 +2545,8 @@ float archRadius(const Model& car, const float hub[3]) {
     return lo;
 }
 
-int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpoint>& points) {
+int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpoint>& points,
+                        const float* tyreDiameter) {
     static const char* kPoint[4] = { "POINT_WHEEL_FL", "POINT_WHEEL_FR",
                                      "POINT_WHEEL_BL", "POINT_WHEEL_BR" };
     static const char* kTag[4] = { "FL", "FR", "BL", "BR" };
@@ -2578,7 +2609,7 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
 
     int placed = 0;
     float scaleShown[2] = { 0, 0 };
-    bool fitted = false;
+    bool fitted = false, fromData = false;
     for (int w = 0; w < 4; ++w) {
         const Hardpoint* h = findPoint(points, kPoint[w]);
         if (!h) continue;
@@ -2594,10 +2625,17 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
         // does not push into the suspension.
         float scale = (radius > 1e-4f && h->pos[1] > 1e-3f) ? h->pos[1] / radius : 1.0f;
         if (scale < 0.5f || scale > 2.0f) scale = 1.0f;   // a shared file from another car
-        float arch = archRadius(car, h->pos);
-        if (radius > 1e-4f && arch > radius * 0.8f && arch < radius * 1.8f) {
-            float byArch = (arch - 0.035f) / radius;
-            if (byArch > scale) { scale = byArch; fitted = true; }
+        float want = tyreDiameter ? tyreDiameter[rear ? 1 : 0] : 0.0f;
+        if (want > 0.2f && want < 2.0f && radius > 1e-4f) {
+            // the game's own size for this car's tyres
+            scale = 0.5f * want / radius;
+            fromData = true;
+        } else {
+            float arch = archRadius(car, h->pos);
+            if (radius > 1e-4f && arch > radius * 0.8f && arch < radius * 1.8f) {
+                float byArch = (arch - 0.035f) / radius;
+                if (byArch > scale) { scale = byArch; fitted = true; }
+            }
         }
         scaleShown[rear ? 1 : 0] = scale;
 
@@ -2647,11 +2685,15 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
         ++placed;
     }
     if (placed) {
-        char buf[200];
+        char buf[260], why[120] = "";
+        if (fromData)
+            snprintf(why, sizeof(why), " (the car's tyres: %.3f m / %.3f m across, from suspensionbehaviour)",
+                     (double)tyreDiameter[0], (double)tyreDiameter[1]);
+        else if (fitted)
+            snprintf(why, sizeof(why), " (sized to fill the wheel arches)");
         snprintf(buf, sizeof(buf), "%d wheel corner(s) built from the _shared.m3g "
                  "(tyre, rim, disc, caliper), size x%.3f front, x%.3f rear%s", placed,
-                 (double)scaleShown[0], (double)scaleShown[1],
-                 fitted ? " (sized to fill the wheel arches)" : "");
+                 (double)scaleShown[0], (double)scaleShown[1], why);
         car.warnings.push_back(buf);
     }
     return placed;
@@ -2659,8 +2701,32 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
 
 } // namespace
 
+bool rr3TyreDiameters(const uint8_t* plain, size_t len, uint32_t carId, float out[2]) {
+    if (!plain || len < 8 || rd32(plain) != 1) return false;
+    uint32_t count = rd32(plain + 4);
+    if (8 + (size_t)count * 140 > len) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t* r = plain + 8 + (size_t)i * 140;
+        if (rd32(r) != carId) continue;
+        out[0] = rdf(r + 4 + 21 * 4);
+        out[1] = rdf(r + 4 + 22 * 4);
+        return out[0] > 0.2f && out[0] < 2.0f && out[1] > 0.2f && out[1] < 2.0f;
+    }
+    return false;
+}
+
+uint32_t rr3CarIdFromDataName(const std::string& leaf, const std::string& car) {
+    auto low = [](std::string t) { for (char& c : t) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); return t; };
+    std::string l = low(leaf);
+    std::string tail = "_" + low(car) + ".bin.nct";
+    if (l.size() <= tail.size() || l.compare(l.size() - tail.size(), tail.size(), tail) != 0) return 0;
+    std::string num = l.substr(0, l.size() - tail.size());
+    if (num.empty() || num.size() > 6 || num.find_first_not_of("0123456789") != std::string::npos) return 0;
+    return (uint32_t)atoi(num.c_str());
+}
+
 int rr3AttachWheels(Model& car, const Model& wheel,
-                    const std::vector<Hardpoint>& points, bool insetToPoint) {
+                    const std::vector<Hardpoint>& points, bool insetToPoint, const float* tyreDiameter) {
     static const char* kWheelPoints[4] =
         { "POINT_WHEEL_FL", "POINT_WHEEL_FR", "POINT_WHEEL_BL", "POINT_WHEEL_BR" };
     static const char* kWheelNames[4] = { "FL", "FR", "BL", "BR" };
@@ -2672,7 +2738,7 @@ int rr3AttachWheels(Model& car, const Model& wheel,
             return 0;
 
     // a <car>_shared.m3g: tyre, rim, disc and calipers by name
-    int shared = attachSharedCorners(car, wheel, points);
+    int shared = attachSharedCorners(car, wheel, points, tyreDiameter);
     if (shared >= 0) return shared;
 
     // The wheel model is authored around its own hub. Its radius is half the
@@ -2820,6 +2886,19 @@ std::string commonKey(std::string st) {
 
 // how well a shared texture fits a material: 3 exact, 2 more specific
 // (tyre -> tyre_tread), 1 the same trailing word (mat04 -> suede_..._mat04)
+// how much of the texture a mesh's UVs cover: the larger of the two spans
+// (1 for a mesh drawn over the whole picture, small for a corner of an atlas)
+float uvSpan(const Mesh& me) {
+    if (me.uvs.size() < 2) return 1.0f;
+    float lo[2] = { me.uvs[0], me.uvs[1] }, hi[2] = { me.uvs[0], me.uvs[1] };
+    for (size_t i = 0; i + 1 < me.uvs.size(); i += 2)
+        for (int k = 0; k < 2; ++k) {
+            lo[k] = std::min(lo[k], me.uvs[i + k]);
+            hi[k] = std::max(hi[k], me.uvs[i + k]);
+        }
+    return std::max(hi[0] - lo[0], hi[1] - lo[1]);
+}
+
 int commonFit(const std::string& x, const std::string& stem) {
     std::string key = commonKey(stem);
     if (key == x) return 3;
@@ -2835,20 +2914,32 @@ int commonFit(const std::string& x, const std::string& stem) {
 
 } // namespace
 
-int rr3AssignTextures(Model& m, const std::string& modelPath,
-                      const std::function<std::string(const std::string&)>& find,
-                      const std::vector<std::pair<std::string, std::string>>& common,
-                      const NctLiveries* liveries, std::string* report) {
+std::string rr3CarNameFor(const std::string& modelPath, bool* interior) {
     // 1979_porsche_935_a.m3g / 1979_porsche_935_int_a.m3g -> 1979_porsche_935
     std::string car = lowerCopy(stripExtension(baseName(modelPath)));
     if (car.size() > 2 && car[car.size() - 2] == '_' && car.back() >= 'a' && car.back() <= 'z')
         car.erase(car.size() - 2);
-    bool interior = false;
+    bool in = false;
     if (car.size() > 4 && car.compare(car.size() - 4, 4, "_int") == 0) {
         car.erase(car.size() - 4);
-        interior = true;
+        in = true;
     }
-    if (car.size() > 7 && car.compare(car.size() - 7, 7, "_shared") == 0) car.erase(car.size() - 7);
+    // <car>_shared.m3g (the wheel corners); the wheel library's
+    // vehicles/wheels/<wheel>/<wheel>_wheels.m3g and tyre_<n>_tyres.m3g
+    for (const char* tail : { "_shared", "_wheels", "_tyres" }) {
+        size_t n = strlen(tail);
+        if (car.size() > n && car.compare(car.size() - n, n, tail) == 0) { car.erase(car.size() - n); break; }
+    }
+    if (interior) *interior = in;
+    return car;
+}
+
+int rr3AssignTextures(Model& m, const std::string& modelPath,
+                      const std::function<std::string(const std::string&)>& find,
+                      const std::vector<std::pair<std::string, std::string>>& common,
+                      const NctLiveries* liveries, std::string* report) {
+    bool interior = false;
+    std::string car = rr3CarNameFor(modelPath, &interior);
     if (car.empty()) return 0;
 
     std::map<std::string, std::string> found;     // stem -> path ("" = not there)
@@ -2863,12 +2954,15 @@ int rr3AssignTextures(Model& m, const std::string& modelPath,
     // The car's .liveries file lists every texture its materials draw on,
     // the shared ones in common/ included, and names the default paint.
     std::vector<std::string> table;               // its common/ textures' stems
+    std::vector<std::string> ownListed;           // its own folder's, as listed
     std::string defaultLivery;
     if (liveries && liveries->ok)
         for (const NctLiveries::Texture& t : liveries->textures) {
             if (!t.sure) continue;
             std::string st = leafStem(t.path);
-            if (lowerCopy(t.path).compare(0, 7, "common/") == 0) table.push_back(st);
+            std::string lp = lowerCopy(t.path);
+            if (lp.compare(0, 7, "common/") == 0) table.push_back(st);
+            else if (lp.find('/') == std::string::npos) ownListed.push_back(lowerCopy(st));
             if (defaultLivery.empty() && lowerCopy(t.path).compare(0, 7, "livery/") == 0)
                 defaultLivery = st;
         }
@@ -2899,6 +2993,7 @@ int rr3AssignTextures(Model& m, const std::string& modelPath,
     };
 
     int assigned = 0;
+    std::map<std::string, std::string> trimDefaults;   // slot -> the black default used
     std::map<std::string, std::string> materialTex;
     std::map<std::string, std::string> missing;   // _mm_ name -> what was looked for
     for (Mesh& mesh : m.meshes) {
@@ -2960,20 +3055,46 @@ int rr3AssignTextures(Model& m, const std::string& modelPath,
         }
         std::vector<std::string> tries;           // the car's own files, in order
         bool shared = false;                      // then look in common/
+        bool discFromWheel = false;               // then the rim's atlas, if it fits
+        bool isTrim = x.size() == 5 && x.compare(0, 3, "mat") == 0 && liveries && liveries->ok;
         if (x == "ext") {
             if (!defaultLivery.empty()) tries.push_back(defaultLivery);
             for (const char* s : { "_ext_01", "_ext_1", "_ext_default", "_ext" }) tries.push_back(car + s);
             tries.push_back(car + "_ext_*");
         } else if (x == "tyre" || x == "tire") {
+            tries = { car + "_tyre", car + "_tire" };   // the wheel library's own tyres
             shared = true;                        // common/car_tyre_tread_<year>
-        } else if (x == "wheel") {
-            // most cars: <car>_wheel; some name the colour instead
-            // (2015_renault_megane_trophy_r_wheel_red)
-            tries = { car + "_wheel", car + "_wheel_*" };
-        } else if (x == "rotor" || x == "rotor_rear" || x == "wheel_rear" || x == "caliper") {
-            tries = { car + "_" + x, car + "_wheel", car + "_wheel_*" };
-        } else if (x == "wheel_blur") {
-            tries = { car + "_wheel_blur", car + "_wheel" };
+        } else if (x == "wheel" || x == "wheel_blur") {
+            // The rim the car wears, as its .liveries list names it: the
+            // 911 GT3 RS ships _wheel, _wheel_black and _wheel_gold and lists
+            // _wheel_black (and _wheel_black_blur); the Megane has only
+            // _wheel_red. Without a list: <car>_wheel, then any _wheel_<colour>
+            // that is not a blur picture (or is one, for the blur part).
+            bool blur = x == "wheel_blur";
+            for (const std::string& st : ownListed) {
+                if (st.compare(0, car.size() + 6, car + "_wheel") != 0) continue;
+                if ((st.find("blur") != std::string::npos) != blur) continue;
+                if (st.find("rear") != std::string::npos) continue;
+                tries.push_back(st);
+                break;
+            }
+            if (blur) { tries.push_back(car + "_wheel_blur"); tries.push_back(car + "_wheel"); }
+            else tries.push_back(car + "_wheel");
+            for (const std::string& st : ownListed)      // a listed one, whatever it is called
+                if (st.compare(0, car.size() + 6, car + "_wheel") == 0 &&
+                    (st.find("blur") != std::string::npos) == blur && st.find("rear") == std::string::npos)
+                    tries.push_back(st);
+            tries.push_back(car + "_wheel_*");
+        } else if (x == "wheel_rear") {
+            tries = { car + "_wheel_rear", car + "_wheel", car + "_wheel_*" };
+        } else if (x == "rotor" || x == "rotor_rear" || x == "caliper") {
+            // The disc is a shared picture: the 911 GT2 RS's .liveries list
+            // gives its mm_rotor common/car_rotor_07, and the disc's UVs
+            // cover the whole of it. The rim texture is only right when the
+            // disc is drawn from a corner of it (some cars pack it there).
+            tries = { car + "_" + x };
+            shared = true;
+            discFromWheel = true;
         } else if (x == "sw" || x == "steering_wheel") {
             tries = { car + "_sw", car + "_int" };
         } else if (x.compare(0, 7, "windows") == 0 || x == "driver" || x == "arms" ||
@@ -2990,7 +3111,37 @@ int rr3AssignTextures(Model& m, const std::string& modelPath,
             path = look(t);
             if (!path.empty()) break;
         }
-        if (path.empty() && shared) path = fromCommon(x);
+        if (path.empty() && shared && isTrim) {
+            // Cockpit trim slots are a fixed scheme across the game - mat00
+            // carbon, mat01 leather, mat02 stitching, mat03 plastic leather,
+            // mat04 suede, mat06 rubber or carpet, mat07 aluminium - and a
+            // car's .liveries list names only the slots it recolours (the
+            // 911 GT3 RS: just stitching_black_mat02). So: what the list
+            // says, else the slot's black version, never just any picture
+            // whose name ends in the slot (that put a see-through stitching
+            // texture on the GT3 RS's steering wheel rim).
+            for (const std::string& st : table)
+                if (commonFit(x, st) >= 1) { path = look(st); if (!path.empty()) break; }
+            if (path.empty()) {
+                std::string best, bestStem;
+                for (const auto& c : common) {
+                    const std::string& st = c.first;
+                    if (st.size() <= x.size() + 1 || st.compare(st.size() - x.size() - 1, x.size() + 1, "_" + x) != 0)
+                        continue;
+                    if (st.find("_black_") == std::string::npos && st.compare(0, 6, "black_") != 0) continue;
+                    if (st.find("cross") != std::string::npos || st.find("holes") != std::string::npos) continue;
+                    if (bestStem.empty() || st.size() < bestStem.size() ||
+                        (st.size() == bestStem.size() && st < bestStem)) { best = c.second; bestStem = st; }
+                }
+                if (!best.empty()) { path = best; trimDefaults[x] = bestStem; }
+            }
+        } else if (path.empty() && shared) path = fromCommon(x);
+        if (path.empty() && x == "rotor_rear") path = fromCommon("rotor");
+        if (path.empty() && discFromWheel && uvSpan(mesh) < 0.5f)
+            for (const std::string& t : { car + "_wheel", car + "_wheel_*" }) {
+                path = look(t);
+                if (!path.empty()) break;
+            }
         if (path.empty()) {
             if (!missing.count(x)) missing[x] = tries.empty() ? "common/" + x : tries.front();
             if (x.compare(0, 7, "windows") == 0) {
@@ -3035,6 +3186,12 @@ int rr3AssignTextures(Model& m, const std::string& modelPath,
             ++listed;
         }
         if (more) *report += ", and " + std::to_string(more) + " more";
+    }
+    if (!trimDefaults.empty()) {
+        std::string line = "cockpit trim the car's .liveries list leaves at the game's default: ";
+        bool first = true;
+        for (auto& kv : trimDefaults) { line += (first ? "" : ", ") + kv.first + " = " + kv.second; first = false; }
+        m.warnings.push_back(line);
     }
     return assigned;
 }

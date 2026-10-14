@@ -1,6 +1,6 @@
 # Third-party notices
 
-Monkey Tool's own code is under the [MIT License](LICENSE). The pieces below belong to other projects and stay under their own licenses.
+Monkey Tool's own code is under the [MIT License](LICENSE). That includes the LZMA decoder (`src/nfsnl_lzma.cpp`), written for the tool from the format's description. The pieces below belong to other projects and stay under their own licenses.
 
 ## Included in this repository
 

@@ -315,8 +315,23 @@ bool dataFromText(const std::string& text, Bytes& out, std::string& why) {
     return true;
 }
 
+namespace {
+// Real Racing 3's gametext.txt / text_<language>.txt, kept under their own RC4
+bool isRr3TextName(const std::string& path) {
+    std::string l = baseName(path);
+    for (char& c : l) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    return l == "gametext.txt" || (l.size() > 9 && l.compare(0, 5, "text_") == 0 && l.compare(l.size() - 4, 4, ".txt") == 0);
+}
+}
+
 bool dataEditableText(const std::string& path, const uint8_t* d, size_t n,
                       std::string& text, std::string& why) {
+    if (isRr3TextName(path) && n && !rr3TextIsPlain(d, n)) {
+        Bytes p;
+        rr3TextTransform(d, n, p);
+        text.assign(p.begin(), p.end());
+        return true;
+    }
     std::string e = extensionOf(path);
     if (isSoundDefName(path)) {
         SoundDef s;
@@ -369,6 +384,11 @@ bool dataEditableText(const std::string& path, const uint8_t* d, size_t n,
 bool dataFromEditedText(const std::string& path, const std::string& text,
                         const uint8_t* original, size_t originalLen,
                         Bytes& out, std::string& why) {
+    if (isRr3TextName(path) && originalLen && !rr3TextIsPlain(original, originalLen)) {
+        // back under the game's RC4, as it was
+        rr3TextTransform((const uint8_t*)text.data(), text.size(), out);
+        return true;
+    }
     std::string e = extensionOf(path);
     std::vector<std::string> ls = lines(text);
     bool soundDef = false;

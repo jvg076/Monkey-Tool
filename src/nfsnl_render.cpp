@@ -57,6 +57,9 @@ std::vector<uint8_t> visibleMeshes(const Model& m, const RenderView& view) {
         const Mesh& mesh = m.meshes[i];
         // a part with no detail level of its own belongs to every level
         if (!view.lodFilter.empty() && !mesh.lod.empty() && mesh.lod != view.lodFilter) vis[i] = 0;
+        // collision hulls and the decal shell are never drawn by the game:
+        // only when HELPERS is the level picked, never over the car
+        if (mesh.lod == "HELPERS" && view.lodFilter != "HELPERS") vis[i] = 0;
         if (mesh.positions.empty() || mesh.indices.empty()) vis[i] = 0;
         if (view.hideGlow && isGlowCard(mesh)) vis[i] = 0;
     }
@@ -110,6 +113,12 @@ AlphaMode meshAlphaMode(const Mesh& mesh, const AlphaStats* tex, float* alphaSca
     for (char& c : t) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
     auto has = [&](const char* k) { return t.find(k) != std::string::npos; };
     if (alphaScale) *alphaScale = 1.0f;
+    // the collision hulls and the decal shell: see-through, so the car shows
+    // through them and they read as what they are
+    if (mesh.lod == "HELPERS") {
+        if (alphaScale) *alphaScale = kHelperAlpha;
+        return ALPHA_BLEND;
+    }
     // No Limits says it outright: *_opaque, *_alpha, *_alphaadd
     bool saysOpaque = has("opaque") && !has("_alpha");
     if (saysOpaque) return ALPHA_OPAQUE;
@@ -165,6 +174,27 @@ AlphaMode meshAlphaMode(const Mesh& mesh, const AlphaStats* tex, float* alphaSca
     return ALPHA_OPAQUE;
 }
 
+bool projectPoint(const RenderView& view, int width, int height, const float p[3],
+                  float& sx, float& sy, float& depth) {
+    // the same camera renderModel sets up
+    float cy = std::cos(view.yaw), sy0 = std::sin(view.yaw);
+    float cp = std::cos(view.pitch), sp = std::sin(view.pitch);
+    float right[3] = { -cy, 0, sy0 };
+    float upv[3] = { sy0 * sp, cp, cy * sp };
+    float fwd[3] = { sy0 * cp, -sp, cy * cp };
+    float focal = 0.5f * (float)height / std::tan(0.5f * view.fovY);
+    float q[3];
+    for (int k = 0; k < 3; ++k) q[k] = p[k] + view.modelPos[k] - view.centre[k];
+    float vx = q[0] * right[0] + q[1] * right[1] + q[2] * right[2] - view.pan[0];
+    float vy = q[0] * upv[0] + q[1] * upv[1] + q[2] * upv[2] - view.pan[1];
+    float vz = q[0] * fwd[0] + q[1] * fwd[1] + q[2] * fwd[2] + view.distance;
+    if (vz < 0.001f) return false;
+    sx = 0.5f * width + vx * focal / vz;
+    sy = 0.5f * height - vy * focal / vz;
+    depth = vz;
+    return true;
+}
+
 std::string rr3ShaderFor(const Mesh& mesh) {
     std::string t = mesh.material + " " + mesh.name;
     for (char& c : t) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
@@ -184,7 +214,19 @@ std::string rr3ShaderFor(const Mesh& mesh) {
     return "matte";
 }
 
-Image rr3ShaderMatcap(const Image* fresnel, const Image* spec, int size) {
+float rr3ShaderStrength(const std::string& sh) {
+    if (sh == "chrome") return 1.0f;
+    if (sh == "gloss") return 0.8f;
+    if (sh == "wheel_alloy") return 0.7f;
+    if (sh == "glass" || sh == "light_housing") return 0.6f;
+    if (sh == "rotor" || sh == "carbon_fibre") return 0.45f;
+    if (sh == "tires") return 0.25f;
+    // the cockpit's leather, suede, plastics and the driver's suit: a sheen
+    if (sh == "dash_matte" || sh == "cloth" || sh == "matte") return 0.15f;
+    return 0.3f;
+}
+
+Image rr3ShaderMatcap(const Image* fresnel, const Image* spec, int size, float strength) {
     Image out;
     if (size < 8) return out;
     Image fr, sp;
@@ -237,7 +279,7 @@ Image rr3ShaderMatcap(const Image* fresnel, const Image* spec, int size) {
             float ndh = std::max(0.0f, x * H[0] + y * H[1] + nz * H[2]);
             ramp(sp, ndh, s);
             for (int k = 0; k < 3; ++k) {
-                float v = f[k] * env[k] * 0.55f + s[k] * 0.8f;
+                float v = (f[k] * env[k] * 0.55f + s[k] * 0.8f) * strength;
                 d[k] = (uint8_t)std::max(0.0f, std::min(255.0f, v * 255.0f));
             }
         }
@@ -541,6 +583,7 @@ void renderModel(const Model& model, const RenderView& view,
         const int mode = modeOf[thisMesh];
         const float meshAlpha = alphaOf[thisMesh];
         if (!view.lodFilter.empty() && !mesh.lod.empty() && mesh.lod != view.lodFilter) continue;
+        if (mesh.lod == "HELPERS" && view.lodFilter != "HELPERS") continue;
         if (!inKit[thisMesh]) continue;
         if (mesh.positions.empty() || mesh.indices.empty()) continue;
 
@@ -562,6 +605,8 @@ void renderModel(const Model& model, const RenderView& view,
         if (view.textured && textures && thisMesh < textures->size())
             tex = (*textures)[thisMesh];
         if (tex && !tex->ok()) tex = nullptr;
+        const bool helper = mesh.lod == "HELPERS";
+        if (helper) tex = nullptr;
         bool hasUv = mesh.uvs.size() * 3 == mesh.positions.size() * 2;
         // A mesh with no texture is drawn in its material's colour (bronze
         // chrome, gloss black) when the view is textured; plain grey otherwise.
@@ -573,6 +618,7 @@ void renderModel(const Model& model, const RenderView& view,
             };
             baseR = to8(mesh.color[0]); baseG = to8(mesh.color[1]); baseB = to8(mesh.color[2]);
         }
+        if (helper) { baseR = (int)(kHelperColour[0] * 255); baseG = (int)(kHelperColour[1] * 255); baseB = (int)(kHelperColour[2] * 255); }
 
         size_t nv = mesh.positions.size() / 3;
         bool hasNormals = mesh.normals.size() == mesh.positions.size();
@@ -604,6 +650,7 @@ void renderModel(const Model& model, const RenderView& view,
                 const float* c = &mesh.colors[i * 4];
                 sh *= 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
             }
+            if (view.textured && mesh.light.size() == nv) sh *= mesh.light[i];
             v.shade = sh;
             if (hasUv) { v.u = mesh.uvs[i*2]; v.v = mesh.uvs[i*2+1]; }
             else { v.u = v.v = 0; }

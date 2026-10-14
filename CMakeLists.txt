@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(MonkeyTool VERSION 1.2.2 LANGUAGES CXX)
+project(MonkeyTool VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +28,10 @@ set(CORE_SOURCES
     src/nfsnl_library.cpp
     src/nfsnl_profiles.cpp
     src/nfsnl_rr3.cpp
+    src/nfsnl_rr3car.cpp
+    src/nfsnl_rr3add.cpp
+    src/nfsnl_rr3career.cpp
+    src/nfsnl_gltf.cpp
     src/nfsnl_import.cpp
     src/nfsnl_data.cpp
     src/nfsnl_save.cpp
@@ -38,6 +42,7 @@ set(CORE_SOURCES
     src/nfsnl_scene.cpp
     src/nfsnl_astc.cpp
     src/nfsnl_brotli.cpp
+    src/nfsnl_lzma.cpp
     src/nfsnl_jsr.cpp
     src/nfsnl_lzham.cpp
     ${LZHAM_SOURCES}

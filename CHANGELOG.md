@@ -2,6 +2,363 @@
 
 Every release of Monkey Tool, newest first.
 
+## 1.3.0
+
+### Changed
+* **No menu bar.** File, View, Tools, Options and Help are gone; every command is an icon in one
+  row above the preview, each with a tooltip.
+  * New icons: new track, install a car mod, edit car points, encode .nct / .gui,
+    **Show** (funnel: all assets / textures / 3D models / sounds, and convert everything shown)
+    and **Options** (gear: Theme Light / Dark, vgmstream, LZHAM, About).
+  * All icons sit at one even spacing; the wider gap after the save icon is gone.
+  * Shortcuts still work (Ctrl+O, S, I, E, L). "Show the file this asset is in" is also on the
+    tree's right-click menu. Extract and export of folders and selections stay on that menu too.
+  * "Open a picture" and "Exit" are dropped (the window's close button exits).
+
+### Fixed
+* **Ferrari (and any car) cockpit paint blotched.** The cockpit's sun-shadow shading was laid
+  over the bodywork the cockpit model shows through the windscreen (bonnet, doors, mirrors):
+  yellow paint with dark patches on the F12tdf's `_int_b`. Only the cabin's own parts take it now.
+* **Cockpits too white ("after a nuclear bomb").** The shader reflection was added at full
+  strength on every part; the dashboard ramp alone reaches nearly white. Each shader now has its
+  own strength: chrome full, gloss paint 0.8, alloys 0.7, glass 0.6, carbon and rotors 0.45,
+  tyres 0.25, matte dash, cloth and leather 0.15.
+* **Megane Trophy-R steering wheel floating behind its column** (exterior LODs). Lining the
+  outside wheel up with the cockpit's wheel left it 7-12 cm short of the dash. The wheel now
+  slides forward along the car onto the nearest part of its own cab on the hub's line (at most
+  15 cm, never backwards, not at all when nothing is there). The cockpit wheels already sat on
+  their column and in the driver's hands. The wheel's tilt is only changed where the car's
+  points give a hinge (the Megane's give none).
+* **No Limits HELPERS** (collision hulls, rain collider, decal placement shell) are no longer
+  drawn over the car in "All LODs". Picked on their own (the HELPERS level) they show as pale
+  blue see-through shells, the same look the FBX export gives them.
+
+## 1.2.10
+
+### New
+* **glTF 2.0 (.glb) export.** Models save as one .glb file with everything inside: geometry,
+  materials and the textures as PNG.
+  * Same parts and tree as the FBX: LOD, then part, then meshes, plus the hardpoints as empty nodes.
+  * Second UV set and vertex colours carried; glass and lights blend, light glows are emissive.
+  * No Limits' HELPERS are left out (glTF has no hidden flag).
+  * In the tool: Save as... > "glTF 2.0 binary". Command line: `one ... --format glb`,
+    `convert --mdl glb`.
+  * Checked against the glTF 2.0 rules on a Real Racing 3 and a No Limits car.
+* **Install a car mod** (Tools, Real Racing 3).
+  * Pick a mod's folder. Its cars go into the game's own lists as they are now, never by copying
+    the mod's own `cardesc.list`, `carappearances`, damage and suspension tables, texts or asset
+    list. Copying those was what made a second mod wipe out the first: two mods for slot 611
+    left only one car.
+  * When the slot a car was made for is taken, the tool says by which car and asks
+    "add it in the free slot 612?". Yes installs it as car 612, and both stay.
+  * The car's name key moves with it (`..._611` becomes `..._612`), and its name is added in
+    every language.
+  * Files the mod would change outside its car(s) are listed first and only replaced if you say so.
+  * Originals kept as .bak, and the REPLACED / NEW list shown.
+  * Command line: `rr3mod show` / `rr3mod install ... --free-slot`.
+* **Points editor.** After a car with a new model is saved, the car creator asks "Do you want to
+  edit the positions of the car's points?" (also Tools > Edit car points).
+  * The car with its wheels, every point on it: lights yellow, exhausts orange, wheels blue,
+    hinges green.
+  * Click one, or pick it in the list, then type X / Y / Z or nudge it (1 mm to 10 cm).
+  * The other side's twin (LEFT / RIGHT, FL / FR) follows mirrored, unless switched off.
+  * Moving a wheel point moves the wheel; double-click looks at a point from close by.
+  * Save writes only the moved positions, and every other byte of the .points stays.
+  * Command line: `rr3points list / set`.
+* **Wheels at the game's own size.** `suspensionbehaviour` holds each car's front and rear tyre
+  diameters (911 GT3 RS 0.710 / 0.720 m; SF24 0.719 / 0.748 m, 18-inch F1 tyres). The wheels are
+  sized from those instead of being guessed from the arches. The Megane's came out 4% too small.
+* **`_shared.m3g` on its own** shows the four corners as the game puts them together, at the
+  car's tyre size, with the light glows and the bonnet camera's body. Before, it showed one wheel
+  with both sides' calipers floating round it.
+* **"Lights" switch** in the viewer: the light glow cards (the beams on the road at night).
+
+### Fixed
+* **Aspiration did not change.**
+  * In the car creator's full list, a value typed into the box only counted after "Set". Moving on
+    without it kept the old value, and it now counts.
+  * Aspiration has its own box in Performance: Nat, Turbo, Super, None.
+  * Typed values become the game's words ("normal" is Nat, "supercharged" is Super) or are
+    refused; "normal" had been written as it was, a word the game does not know.
+  * The same goes for drivetrain, layout and class. The three rally cars' RLY drivetrain was
+    turned into RWD when edited; RLY is in the box now.
+* **Cockpit too bright, wrong steering wheel texture.**
+  * Cockpit trim (`mat00`..`mat07`: carbon, leather, stitching, plastic leather, suede, rubber,
+    aluminium) now uses what the car's .liveries list names, else the slot's black version.
+    Before, the tool took any texture whose name ended the same way, which put a see-through
+    stitching texture on the GT3 RS's steering wheel rim.
+  * Cockpits are shaded with their baked light. `<car>_int_shadows` holds one sun-shadow mask
+    per sun direction (43 on the GT3 RS), and their average is applied through the cockpit's
+    second UV set.
+* **Rim texture:** the wheel the car's .liveries list names (the GT3 RS's `wheel_black`, not
+  `wheel`), and the blur texture its own (`wheel_red_blur`).
+* **No Limits HELPERS** (collision boxes, decal shell, rain collider) are written hidden, on a
+  see-through material of their own. Since 1.2.8 they wrapped the car in solid shells.
+* **Message boxes follow the theme.** All the tool's questions and messages are drawn in the
+  dark or light theme (the system box was always light).
+* **Menus.**
+  * Theme moved to Options > Theme, with the vgmstream and LZHAM settings.
+  * File holds open / export / save; Tools holds the editors.
+  * The duplicate "Encode" entry is gone.
+  * Shortcuts no longer run into the label ("Save imported filesCtrl+S"), and the theme in use is
+    ticked.
+* **Toolbar:** even spacing, files and editors in two groups.
+
+### Not changed yet
+* **Steering wheel angle** on cars whose cockpit has a plain `POINT_STEERING_WHEEL` (911 GT2 RS,
+  GT3 RS, Megane). Their files hold no angle: the game's own loader reads a POINT record as a
+  position only, and only a HINGE record carries an orientation. The wheels stay upright, where
+  the cockpit model's wheel is. An in-game picture of one of these cockpits is needed to match
+  the game.
+
+## 1.2.9
+
+### Real Racing 3 - cockpits
+* **Dial needles sit on their dials.**
+  * Needles were put on `POINT_NEEDLE_*_1`. That point is a mark on the dial's edge (the scale's
+    zero), not the dial's centre.
+  * Needles also stood upright, out of the dial face. The Megane Trophy R's showed both
+    problems, in `_int_a` and `_int_b`.
+  * A needle now turns on its `HINGE_NEEDLE_*`, the dial's centre, and lies flat on the dial face
+    at the angle the hinge states (29 and 31 degrees on the Megane).
+  * At rest it points at the zero mark (`_1`).
+  * Checked on the Megane, the GT3 RS and the RX-3.
+  * Needles on a steering wheel's own display use their own hinges
+    (`HINGE_STEERING_WHEEL_NEEDLE_*`).
+* **Cockpits whose steering point is a hinge show their wheel.**
+  * The Taycan Turbo GT and the F1 cars name the point `HINGE_STEERING_WHEEL`. Their cockpit
+    models left the steering wheel and the driver's hands at the origin, under the floor.
+  * Both are now placed, and raked as the hinge states. The Taycan's wheel leans 15 degrees,
+    top towards the dashboard. The outside model's wheel takes the same rake.
+  * A plain `POINT_STEERING_WHEEL` (the 911 GT3 RS and GT2 RS) states no angle. The game has no
+    default rake setting either, so those wheels stay as modelled. 1.2.8 already put them at
+    the cockpit wheel's position.
+* **Importing back undoes the turn too.** A part the viewer tilted (wheel, hands, needles) goes
+  back into the `.m3g` turned and moved back exactly. Normals are turned back as well. Checked
+  on the Taycan and the Megane: worst vertex error 1 micrometre.
+
+### Real Racing 3 - textures
+* **Brake discs use their own texture.**
+  * A disc (`mm_rotor`) with no `<car>_rotor` texture was drawn with the rim texture
+    (`<car>_wheel`). That painted spokes on the disc, as on the 911 GT2 RS.
+  * The car's `.liveries` list names the shared picture the game uses (`common/car_rotor_07`
+    for the GT2 RS), and that one is now used.
+  * The rim texture is only used when a disc is drawn from a corner of the rim texture. None of
+    the 16 cars and wheels checked do this: every disc covers its whole texture.
+* **The `.liveries` list is found for `<car>_shared.m3g` too.** Opening the wheel corners on
+  their own missed the list, so the disc and the default paint were guessed.
+
+### Command line
+* `render --centre X Y Z --dist D`: orbit a point instead of the whole model, for close looks
+  at a cockpit.
+
+## 1.2.8
+
+### Model export (FBX / OBJ)
+* **No more invisible or see-through parts after export.** Damage parts, helpers, the bonnet and
+  cockpit cameras and the body kits you didn't choose were written as hidden objects
+  (`Visibility 0`). The preview drew them, but 3ds Max showed them as invisible or see-through
+  and Blender greyed them out, so they looked like meshes with 0 vertices. Every exported mesh is
+  now visible. Body kits you didn't choose are left out of the file instead of hidden; export
+  with kit "all" to get every part.
+* **Exports are twice as fast and about 8% smaller.** Numbers are written without trailing zeros
+  (`0` instead of `0.000000`). The values are the same to the last decimal.
+* **Safer files.**
+  * A mesh whose index list doesn't end on a whole triangle now writes only its whole triangles,
+    so the count in the FBX always matches the list.
+  * An OBJ mesh without normals no longer reads past its data.
+
+### Real Racing 3 - steering wheel position
+* **The outside steering wheel sits where the cockpit's does.**
+  * The outside model's wheel (seen through the windows) and the cockpit's wheel are modelled
+    around different centres.
+  * The outside wheel used to go on the cockpit's steering point, which put it into the
+    dashboard on some cars: 12.8 cm too far forward on the 2018 911 GT3 RS, 11.7 cm on the
+    Taycan Turbo GT and 8.7 cm on the Zenvo Aurora.
+  * The tool now centres it on the cockpit's own wheel, read from `<car>_int_a.m3g`. The info
+    line says "steering wheel lined up with the one in ..._int_a.m3g (moved N cm)".
+  * Cars that were already right barely move (the 935: 0.3 cm).
+  * Importing a model back into the car uses the same placement, so a model you exported goes
+    back exactly where it was.
+* A cockpit that names its point `HINGE_STEERING_WHEEL` no longer risks picking a suspension
+  steering strut (as on the F1 cars) for the steering wheel.
+
+## 1.2.7
+
+### Real Racing 3 - car creator
+* **Liveries made clear.** Step "Liveries & sound" lists the car's own liveries first: number,
+  name, button colour and texture file, e.g. `2025_porsche_taycan_turbo_gt_weissach_ext.etc.dds.z`.
+  New ones follow, marked NEW. To add one:
+  1. Type its name, e.g. "Shade Green". The window shows the texture it gets, named as the game
+     names its own: `livery/2025_porsche_taycan_turbo_gt_weissach_ext_shade_green.etc.dds.z`.
+  2. Pick its body colour.
+  3. Optionally give your own texture.
+
+  The tool adds the livery to the car's liveries list, makes its texture and lists it in the
+  asset list. Only new liveries can be removed; the car's own stay.
+* **Repainting changes only the paint.** Without your own texture, a new livery is the car's body
+  texture with the paint recoloured. Badges, lettering, carbon, lights and panel lines keep their
+  colours; before, the whole texture was tinted.
+* **Livery textures come out right.** Inside the tool, textures were read already unpacked and
+  without their `.z`, so new liveries were copied unpainted and written as `.etc.dds`. They are
+  now painted and written as `.etc.dds.z`, as the game reads them.
+* **Saving is one button.**
+  * Changing a car of the game: "Save into the game" writes straight into the game's folder.
+    Each replaced file's original is kept once as `.bak`.
+  * Adding a new car: "Create the car..." asks where to save the files.
+
+  Either way a window lists every file, marked REPLACED or NEW, with its full path. "Write to a
+  folder" is gone.
+* **No Look step when changing a car of the game.** That mode has three steps: Car,
+  Performance, Liveries & sound. Models and textures belong to adding a new car.
+
+## 1.2.6
+
+### Real Racing 3
+* **The car creator is simpler.** One window, four steps, with Back / Next or the step buttons:
+  1. **Car**: the car to start from (listed as "Make Model (year)"), the name, the year and the
+     brand. The folder is made from them.
+  2. **Performance**: class, drivetrain, power, torque, weight, top speed, 0-60, PR, the prices
+     and the upgrades, each in a box of its own. "All figures..." still opens the full list.
+  3. **Look**: body and cockpit models, Preview in 3D, the textures folder.
+  4. **Liveries & sound**: liveries and the engine sound.
+
+  "Add a new car" is the default; "Change a car of the game" is the other choice.
+* **More liveries for a car already in the game.** Step 4 adds liveries to a car of the game
+  after the ones it has. Each gets a name, a colour, and a picture or the car's own body texture
+  repainted. The liveries list is pending until Save, like other changes; the new textures go to
+  a folder of your choice. Command line: `rr3car build ... --livery "Name:RRGGBB[:picture]"`.
+* **Dark theme in the tool windows.** Car creator, Racing series and New track follow the dark
+  theme: the title bar, buttons, boxes, lists and their headers. They also follow a theme change
+  made while they are open.
+
+## 1.2.5
+
+### Real Racing 3
+* **Every data file decoded.** The `.nct` / `.gui` scrambling is RC4 with the game's own starting
+  table, key and 133 dropped bytes, read out of `libRealRacing3.so`. The tool now has the real
+  cipher instead of the 70 KB learned pad. All files decode and encode exactly, the 14 MB career
+  `events.dat` included. `gametext.txt` and `text_<language>.txt` use a second key: they open as
+  text in the data editor and are scrambled again on save. File > Finish the .nct pad is gone,
+  as nothing is left to learn.
+* **Add a new car** (car creator > "Add a new car"). The car gets its own id beside the game's
+  cars:
+  * it starts from a car of the game and copies that car's frame, physics, sound and liveries;
+  * you set the folder and name, a brand of the game, the upgrade package and the figures;
+  * your body and cockpit OBJ / FBX are built into .m3g, all levels of detail, along with your
+    textures;
+  * the liveries are yours: a name, a colour, and a picture or the starting car's repainted.
+
+  The tool writes the new car's files and adds it to `cardesc.list`, `carappearances`, the
+  damage and suspension tables, the text files of every language and the asset list. New cars
+  are sold at the dealer: the starting car's unlock condition is not copied. Command line:
+  `rr3car list`, `rr3car add`.
+* **The car's model folder.** A car's data file holds an appearance index that picks its model
+  folder in `carappearances` (`7_2013_chevrolet_camaro_zl1` uses `2013_chevrolet_camarozl1/`).
+  The car creator finds every car's data this way.
+* **Car data: all 540 files read.** Each file has an upgrade package and an unlock condition
+  (either can be empty), and both are now read and editable. This fixes the 5 cars that did not
+  read before (Ford GT, Focus RS, Focus ST, Civic Type R, Renault DeZir).
+* **The car creator absorbs New car.** The separate New car button is gone. Its OBJ / FBX to
+  .m3g build is "Preview in 3D" in the car creator, which takes the button's place.
+* **Racing series** (new button with a chequered flag, also Tools > Racing series). It lists
+  the career's 1602 series with their place in the career menu.
+  * Edit a series: its title, description, allowed cars, events (track, type, laps, tier) and
+    the reward at the end.
+  * A new series copies the layout, rewards and AI of the series it starts from, with new ids.
+    It is shown in a group of your choice, or in a new group of the Career menu with your own
+    card picture, added as a page of the `events/career` sprite atlas.
+
+  The career file is read and written byte for byte. Command line: `rr3series list`,
+  `groups`, `tracks`, `show`, `add` and `edit`.
+* **New track** (Tools > New track, or the Racing series window). A new track starts from one
+  of the game's tracks and gets:
+  * its own id, name, location and country;
+  * an entry in `ttk.dat` (the collision checksum);
+  * a place in the career's track list, so series can race on it;
+  * optionally, its own copy of the starting track's folder, whose models an OBJ / FBX
+    replaces by mesh name.
+
+  Collision, AI line and timing stay the starting track's. Command line: `rr3track list`,
+  `rr3track add`.
+* **Asset list.** `asset_list_base.txtCache.txt` is read and written. Its header is a fixed
+  magic and version, not a checksum. New files are listed with their md5. Changed files keep
+  the official md5 so the game does not download them again; this is an option.
+
+## 1.2.4
+
+### NFS No Limits
+* **Exported cars show every part.** Exports that do not ask about body kits (several assets
+  at once, the command line without `--kit`) wrote the other kits' parts as hidden objects, and
+  Blender opens hidden objects greyed out, as if they had no vertices (Ford Mustang Mk1). They
+  now come out visible; saving one car still asks for the stock car, a kit or every part.
+* **Hardpoints no longer draw lines through the car.** The empties for the wheels, lights,
+  nitro and smoke locators are written at a twentieth of their size, so Blender shows small
+  crosses instead of long lines across the body. Their place is unchanged; set the scale back
+  to 1 before parenting a part to one.
+
+### Real Racing 3
+* **Car creator** (new button beside the Save Editor, also Tools > Car creator): make one of
+  the game's cars over into yours. It keeps the car's place in the game (its id, folder and
+  liveries list) and changes:
+  * the figures: year, make, model, class, drivetrain, weight, top speed, 0-60, braking and
+    grip (stock and fully upgraded), performance rating, aspiration, engine position, power,
+    torque and their rpm, redline, limiter, shift points, gear ratios and final drive, the
+    handling profile and the price (R$ and gold);
+  * the engine sound, taken whole from any other car;
+  * the body and cockpit models, built from your OBJ / FBX on the car's frame;
+  * the textures, from a folder of pictures named like the car's (`misc.png`,
+    `ext_black.png` for one livery, `ext.png` for all of them).
+  "Make it" adds the files to the pending changes (Save writes them into the game); "Write the
+  files to a folder" lays them out as the game does. Command line: `rr3car show`, `rr3car set`
+  and `rr3car build`.
+* **Car data files read in full.** The `.nct` pad was re-learned from the 1,331 data files sent
+  in (540 cars, 542 liveries lists, the tracks and the depot): it now runs to 70,134 bytes, 4,521
+  of them certain, and every byte of 474 of the 540 car data files is certain (before: 1,657 of
+  5,781). The liveries lists' texture tables read in full too.
+* **Wheel textures in the viewer.** The wheel library (`vehicles/wheels/<wheel>/<wheel>_wheels.m3g`,
+  `tyre_standard1_tyres.m3g`) found no textures; it now uses `<wheel>_wheel`,
+  `<wheel>_wheel_blur` and `<tyre>_tyre` beside it.
+
+## 1.2.3
+
+### Real Racing 3
+* **Adreno textures.** The `.atc.dds` / `.atc.dds.z` files of the Adreno (Qualcomm) build
+  decode: ATC RGB, ATC with explicit alpha and ATC with interpolated alpha. The 1972 Mazda RX-3
+  opens fully textured, badges included, and a picture can be imported back into an ATC texture.
+  The game profile recognises an Adreno install.
+* **Second UV set.** Track meshes carry a second set of texture coordinates for their baked
+  lighting. It is read and FBX exports write it as a second UV layer, `UVChannel_2` (Monaco:
+  2131 of 2207 parts have one). OBJ holds a single UV set, so it keeps the first.
+
+### NFS No Limits
+* **Body kits in exports.** Saving a car with body kits asks: Yes exports the version the
+  viewer shows (stock or the chosen kit), No exports every part of every kit, all visible.
+  Before, every export came out stock (BMW M5 F90, Ford GT 06). Command line:
+  `one <car> <out> --kit stock|all|<letter>`.
+* **The China build** (Tencent, `com.tencent.tmgp.NFSNL`) opens:
+  * the game is recognised by its package name and its Chinese title;
+  * its OBB packs most files with LZMA, which the tool now decodes - all 7704 files unpack
+    (2922 did not);
+  * its `.sb` files (`ZBIN` + gzip after decryption) decode and export as text;
+  * its `.m3g` cars get their body kits, so the stock car no longer shows every kit at once;
+  * police liveries find their `_diffuse_reflection` textures.
+
+### NFS Undercover, Shift and Shift 2
+* **Every car on its own rims.** All cars wore the same wheel; now each wears the rim the game
+  gives it (from `cars.bin`): the Shift Golf its 5-hole VW rim, the Gallardo, the M3 and the
+  MC12 theirs, the Undercover Carrera GT its 5-spoke.
+* **Shift 2 cars without broken patches.** The exhausts and wings were drawn with the car's
+  own texture, which put stray pieces of body texture on them, and the flame and heat cards
+  of the exhaust showed as flat panels behind the car. Exhausts now use
+  `texture_car_<car>_exhaust`, wings `texture_spoilers`, and the effect cards are hidden.
+* **Shift 2 tracks join up.** Corners and junctions of several Shift 2 tracks were turned the
+  wrong way, leaving gaps and road pieces sticking out (Chicago, London, Tokyo, the Location
+  tracks): Shift 2 uses the layout's second mirror bit for something other than a mirror.
+  The tool now lays the track out both ways and keeps the one whose road pieces meet.
+  `locationb_02`, `locationc_06` and the night tracks were not laid out at all (their layout
+  files open with different bytes) and now are.
+
 ## 1.2.2
 
 ### NFS No Limits

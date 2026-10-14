@@ -721,7 +721,7 @@ Model loadM3g(const uint8_t* data, size_t len, bool flipV) {
     return model;
 }
 
-Model loadModel(const uint8_t* data, size_t len, bool flipV) {
+static Model loadModelInner(const uint8_t* data, size_t len, bool flipV) {
     // Real Racing 3's .m3g is a genuine JSR-184 file and has an exact reader
     // of its own, checked against the geometry it produces. The reader below
     // is the general one, which finds its offsets by trial; it stays as the
@@ -758,6 +758,25 @@ Model loadModel(const uint8_t* data, size_t len, bool flipV) {
         return m;
     }
     return loadSb3d(data, len, flipV);
+}
+
+
+Model loadModel(const uint8_t* data, size_t len, bool flipV) {
+    Model m = loadModelInner(data, len, flipV);
+    // No Limits' own .m3g cars (the China release, No Limits VR) name their
+    // parts the .sb3d way - mesh_paint_hood_b_lod03, mesh_chassis_bumper_rear_a -
+    // so the body kits come from the names, as for the .sb3d cars. Only when
+    // the reader set no kits itself and the names are that kind.
+    if (m.valid) {
+        size_t named = 0;
+        bool kits = false;
+        for (const Mesh& me : m.meshes) {
+            if (me.name.compare(0, 5, "mesh_") == 0) ++named;
+            if (me.kit) kits = true;
+        }
+        if (!kits && named * 2 > m.meshes.size()) nlAssignKits(m);
+    }
+    return m;
 }
 
 } // namespace nfsnl
