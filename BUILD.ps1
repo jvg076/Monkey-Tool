@@ -1,5 +1,5 @@
 # =====================================================================
-#  Monkey Tool 1.3.0 - automatic Windows build
+#  Monkey Tool 1.3.1 - automatic Windows build
 #
 #  You do NOT need Visual Studio, CMake or anything else installed.
 #  If no compiler is found this downloads w64devkit (a portable MinGW
@@ -43,7 +43,7 @@ public static extern bool SetConsoleMode(IntPtr h, uint m);
 } catch {}
 
 Say ""
-Say "  Monkey Tool 1.3.0 - build" "Cyan"
+Say "  Monkey Tool 1.3.1 - build" "Cyan"
 Say "  ========================"  "Cyan"
 Say ""
 
@@ -351,6 +351,7 @@ $core = @(
     "src\nfsnl_rr3add.cpp"
     "src\nfsnl_rr3career.cpp"
     "src\nfsnl_gltf.cpp"
+    "src\nfsnl_export.cpp"
     "src\nfsnl_import.cpp"
     "src\nfsnl_data.cpp"
     "src\nfsnl_save.cpp"
@@ -384,6 +385,34 @@ foreach ($f in (Get-ChildItem -Path (Join-Path $root "src\lzham") -Filter *.cpp)
     $core += $o
 }
 
+# miniz (PNG compression levels), bc7enc (BC7), libogg + libvorbis (Ogg
+# Vorbis): C code, so compiled as C by gcc.exe beside g++.exe
+Say ""
+Say "Compiling miniz, bc7enc, libogg, libvorbis..." "Yellow"
+$gcc = Join-Path (Split-Path $gpp) "gcc.exe"
+if (-not (Test-Path $gcc)) { $gcc = "gcc" }
+$tpDir = Join-Path $root "src\thirdparty"
+$tpObjDir = Join-Path $root "dist\thirdparty_obj"
+New-Item -ItemType Directory -Force -Path $tpObjDir | Out-Null
+$tpFiles = @("bc7enc\bc7enc.c", "miniz\miniz.c", "miniz\miniz_tdef.c", "miniz\miniz_tinfl.c",
+             "ogg\bitwise.c", "ogg\framing.c")
+foreach ($f in (Get-ChildItem -Path (Join-Path $tpDir "vorbis\lib") -Filter *.c)) { $tpFiles += ("vorbis\lib\" + $f.Name) }
+foreach ($rel in $tpFiles) {
+    $src = Join-Path $tpDir $rel
+    $o = Join-Path $tpObjDir (($rel -replace '[\\/]', '_') -replace '\.c$', '.o')
+    & $gcc @("-O2", "-w", "-DMINIZ_NO_STDIO", "-DMINIZ_NO_TIME", "-DMINIZ_NO_ARCHIVE_APIS",
+             "-DMINIZ_NO_ZLIB_COMPATIBLE_NAMES", "-I", (Join-Path $tpDir "miniz"), "-I", (Join-Path $tpDir "ogg"),
+             "-I", (Join-Path $tpDir "vorbis"), "-I", (Join-Path $tpDir "vorbis\lib"), "-c", $src, "-o", $o)
+    if ($LASTEXITCODE -ne 0) {
+        Say "$rel did not compile - see above." "Red"
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    $core += $o
+}
+$tpFlags = @("-DMINIZ_NO_STDIO", "-DMINIZ_NO_TIME", "-DMINIZ_NO_ARCHIVE_APIS", "-DMINIZ_NO_ZLIB_COMPATIBLE_NAMES",
+             "-Isrc\thirdparty\miniz", "-Isrc\thirdparty\ogg", "-Isrc\thirdparty\vorbis")
+
 # icon + version info + visual styles manifest
 $resObj = ""
 if (Test-Path $windres) {
@@ -399,7 +428,7 @@ if (Test-Path $windres) {
 
 Say ""
 Say "Building MonkeyTool.exe ..." "Yellow"
-$guiArgs = @("-std=c++17", "-O2", "-Isrc", "-municode", "-mwindows") +
+$guiArgs = @("-std=c++17", "-O2", "-Isrc", "-municode", "-mwindows") + $tpFlags +
            $core + @("src\main_win32.cpp", "src\win32_save_editor.cpp")
 if ($resObj) { $guiArgs += $resObj }
 $guiArgs += @("-o", "dist\MonkeyTool.exe",
@@ -414,7 +443,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Say "Building monkeytool_cli.exe ..." "Yellow"
-$cliArgs = @("-std=c++17", "-O2", "-Isrc") + $core + @("src\main_cli.cpp",
+$cliArgs = @("-std=c++17", "-O2", "-Isrc") + $tpFlags + $core + @("src\main_cli.cpp",
             "-o", "dist\monkeytool_cli.exe", "-lole32",
             "-static", "-static-libgcc", "-static-libstdc++")
 & $gpp $cliArgs

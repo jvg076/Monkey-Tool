@@ -880,6 +880,15 @@ bool rr3AddCar(const Rr3NewCarJob& job, const std::vector<std::string>& assets,
                 say("Data: the engine sound could not be copied: " + (why.empty() ? from.why : why));
             else say("Data: engine sound from " + (from.toks.size() > 4 && from.toks[3].str ? from.toks[3].s + " " + from.toks[4].s : std::string("the other car")) + ".");
         }
+        // the engine samples under the new car's id (the donor's otherwise,
+        // or the car chosen for its sound)
+        {
+            std::vector<std::pair<std::string, Bytes>> snd;
+            std::string r;
+            rr3CarOwnSoundFiles(car, (uint32_t)newId, assets, read, snd, r);
+            for (auto& f : snd) { files[f.first] = std::move(f.second); isNew.insert(f.first); }
+            if (!r.empty()) { if (r.back() == '\n') r.pop_back(); say(r); }
+        }
         Bytes plain = rr3CarPlain(car);
         std::string rel = "vehicles/data/" + std::to_string(newId) + "_" + folder + ".bin.nct";
         files[rel] = encNct(plain);

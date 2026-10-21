@@ -339,6 +339,39 @@ bool rr3PointsSetPosition(Bytes& file, const std::string& name, const float pos[
     return false;
 }
 
+bool rr3PointsSetBasis(Bytes& file, const std::string& name, const float basis[9]) {
+    const uint8_t* data = file.data();
+    size_t len = file.size();
+    if (len < 4) return false;
+    uint16_t version = rd16(data), count = rd16(data + 2);
+    if (version == 0 || version > 8 || count > 4096) return false;
+    size_t p = 4;
+    for (uint16_t i = 0; i < count && p + 4 <= len; ++i) {
+        uint16_t type = rd16(data + p), recLen = rd16(data + p + 2);
+        p += 4;
+        if (recLen == 0 || p + recLen > len) break;
+        size_t rec = p;
+        p += recLen;
+        size_t nameLen = 0;
+        while (rec + nameLen < len && nameLen < recLen && data[rec + nameLen] != 0) ++nameLen;
+        if (nameLen + 1 > recLen) continue;
+        if (std::string((const char*)data + rec, nameLen) != name) continue;
+        if (type != 2 || (recLen - nameLen - 1) / 4 < 12) return false;     // only a hinge has a turn
+        size_t f = rec + nameLen + 1;
+        for (int r = 0; r < 3; ++r) {
+            // the model's axes back to the file's: (x, y, z) -> (x, -z, y)
+            float row[3] = { basis[r * 3 + 0], -basis[r * 3 + 2], basis[r * 3 + 1] };
+            for (int c = 0; c < 3; ++c) {
+                uint32_t u;
+                memcpy(&u, &row[c], 4);
+                for (int k = 0; k < 4; ++k) file[f + 12 + r * 12 + c * 4 + k] = (uint8_t)(u >> (8 * k));
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 std::vector<Hardpoint> rr3ReadPoints(const uint8_t* data, size_t len) {
     std::vector<Hardpoint> out;
     if (len < 4) return out;
@@ -2583,6 +2616,46 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
         if (r == SR_TYRE_REAR) { hasTyreRear = true; tyreRadiusRear = std::max(tyreRadiusRear, radiusOf(m)); }
     }
     if (parts.empty()) return -1;          // not a shared corner file
+    // Which detail levels go on: on a car, the one its file holds (or the
+    // nearest finer one the _shared has); on its own, every level the
+    // _shared carries, each as its own LOD in the viewer's list - only the
+    // finest used to come in.
+    struct Level { char letter; std::string lod; std::vector<std::pair<const Mesh*, SharedRole>> parts;
+                   bool wheelRear = false, rotorRear = false, tyreRear = false; };
+    std::vector<Level> levels;
+    {
+        std::set<char> letters;
+        for (const Mesh& m : wheel.meshes) {
+            char l;
+            if (sharedRole(m.name, &l) != SR_NONE) letters.insert(l);
+        }
+        std::vector<char> want;
+        if (!carLod.empty()) {
+            char target = (char)('A' + atoi(carLod.c_str() + 3));
+            char pick = best;
+            for (char l : letters) if (l && l <= target) pick = l;
+            want.push_back(pick);
+        } else {
+            want.assign(letters.begin(), letters.end());
+        }
+        for (char l : want) {
+            Level lv;
+            lv.letter = l;
+            if (!carLod.empty()) lv.lod = carLod;
+            else if (l) { char b[8]; snprintf(b, sizeof(b), "LOD%02d", l - 'A'); lv.lod = b; }
+            for (const Mesh& m : wheel.meshes) {
+                char ml;
+                SharedRole r = sharedRole(m.name, &ml);
+                if (r == SR_NONE || ml != l) continue;
+                lv.parts.push_back({&m, r});
+                if (r == SR_WHEEL_REAR) lv.wheelRear = true;
+                if (r == SR_ROTOR_REAR) lv.rotorRear = true;
+                if (r == SR_TYRE_REAR) lv.tyreRear = true;
+            }
+            if (!lv.parts.empty()) levels.push_back(std::move(lv));
+        }
+    }
+    (void)hasWheelRear; (void)hasRotorRear; (void)hasTyreRear;
     if (tyreRadius <= 1e-4f)
         for (auto& pr : parts)
             if (pr.second == SR_WHEEL) tyreRadius = std::max(tyreRadius, radiusOf(*pr.first));
@@ -2639,15 +2712,16 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
         }
         scaleShown[rear ? 1 : 0] = scale;
 
-        for (auto& pr : parts) {
+        for (const Level& lv : levels)
+        for (auto& pr : lv.parts) {
             SharedRole r = pr.second;
             bool turn = true;
             switch (r) {
-                case SR_TYRE:       if (rear && hasTyreRear) continue; break;
+                case SR_TYRE:       if (rear && lv.tyreRear) continue; break;
                 case SR_TYRE_REAR:  if (!rear) continue; break;
-                case SR_WHEEL:      if (rear && hasWheelRear) continue; break;
+                case SR_WHEEL:      if (rear && lv.wheelRear) continue; break;
                 case SR_WHEEL_REAR: if (!rear) continue; break;
-                case SR_ROTOR:      if (rear && hasRotorRear) continue; break;
+                case SR_ROTOR:      if (rear && lv.rotorRear) continue; break;
                 case SR_ROTOR_REAR: if (!rear) continue; break;
                 case SR_CAL_FL: if (rear || right) continue; turn = false; break;
                 case SR_CAL_FR: if (rear || !right) continue; turn = false; break;
@@ -2658,7 +2732,7 @@ int attachSharedCorners(Model& car, const Model& wheel, const std::vector<Hardpo
             Mesh copy = *pr.first;
             copy.name = std::string("WHEEL_") + kTag[w] + "_" + pr.first->name;
             copy.part = std::string("wheel_") + kTag[w];
-            if (!carLod.empty()) copy.lod = carLod;
+            if (!lv.lod.empty()) copy.lod = lv.lod;
             bool rotate = right && turn;
             for (size_t i = 0; i + 2 < copy.positions.size(); i += 3) {
                 float x = copy.positions[i];

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(MonkeyTool VERSION 1.3.0 LANGUAGES CXX)
+project(MonkeyTool VERSION 1.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,23 @@ if(NOT MSVC)
     set_source_files_properties(${LZHAM_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 
+# miniz (zlib levels for PNG), bc7enc (BC7), libogg + libvorbis (Ogg Vorbis)
+set(THIRDPARTY_SOURCES
+    src/thirdparty/bc7enc/bc7enc.c
+    src/thirdparty/miniz/miniz.c
+    src/thirdparty/miniz/miniz_tdef.c
+    src/thirdparty/miniz/miniz_tinfl.c
+    src/thirdparty/ogg/bitwise.c
+    src/thirdparty/ogg/framing.c
+)
+file(GLOB VORBIS_SOURCES ${CMAKE_SOURCE_DIR}/src/thirdparty/vorbis/lib/*.c)
+list(APPEND THIRDPARTY_SOURCES ${VORBIS_SOURCES})
+if(NOT MSVC)
+    set_source_files_properties(${THIRDPARTY_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
+endif()
+add_compile_definitions(MINIZ_NO_STDIO MINIZ_NO_TIME MINIZ_NO_ARCHIVE_APIS MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+include_directories(src/thirdparty/miniz src/thirdparty/ogg src/thirdparty/vorbis src/thirdparty/vorbis/lib)
+
 set(CORE_SOURCES
     src/nfsnl_core.cpp
     src/nfsnl_image.cpp
@@ -32,6 +49,7 @@ set(CORE_SOURCES
     src/nfsnl_rr3add.cpp
     src/nfsnl_rr3career.cpp
     src/nfsnl_gltf.cpp
+    src/nfsnl_export.cpp
     src/nfsnl_import.cpp
     src/nfsnl_data.cpp
     src/nfsnl_save.cpp
@@ -46,6 +64,7 @@ set(CORE_SOURCES
     src/nfsnl_jsr.cpp
     src/nfsnl_lzham.cpp
     ${LZHAM_SOURCES}
+    ${THIRDPARTY_SOURCES}
 )
 
 # ---- command line tool (all platforms) ----

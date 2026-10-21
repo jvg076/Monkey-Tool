@@ -117,23 +117,20 @@ The tool has its own code for DEFLATE, PNG (including Apple's iPhone PNGs), JPEG
    whole path, and the results are expanded for you. Clear the box to get the
    whole tree back.
 
-4. **Double-click any asset to save it.** The file-type dropdown in the Save
-   dialog chooses the format:
+4. **Double-click any asset (or right-click > Export...) to save it.** Models, textures and
+   sounds open the **Export settings** window first, the way Frosty's export does, then the file
+   or folder is chosen. The choices are remembered. Folders and selections (right-click) go
+   through the same window.
 
-   | Asset         | Formats offered                      |
-   |---------------|--------------------------------------|
-   | `.sb3d`       | FBX, OBJ                             |
-   | `.m3g`        | FBX, OBJ                             |
-   | `.sba`        | PNG, JPEG, BMP, TGA, DDS, original   |
-   | `.wem`        | WAV, original                        |
-   | `.bnk`        | every sound inside, WAV, text, original |
-   | `.sbfx`, `.sb` | text, original                      |
-   | `.etc.dds` (RR3) | PNG, JPEG, BMP, TGA, original     |
-   | `.points` (RR3) | text, original                     |
-   | `.pvr`, `.ptc.pvr` | PNG, JPEG, BMP, TGA, original   |
-   | `.nct` (RR3)  | text, decoded `.bin`, original       |
-   | `.gui` (RR3)  | decoded XML, text, original          |
-   | anything else | text, original data                  |
+   | Section  | Settings |
+   |----------|----------|
+   | Models   | FBX, OBJ, glTF 2.0 (.glb) or the original file; scale (game units, metres, centimetres, millimetres, inches); every LOD or the most detailed only; helpers (collision hulls, decal shell) in or out; textures beside the model; No Limits body kits and setup colours |
+   | Textures | PNG (zlib level 0-9), JPEG (quality), BMP, TGA, DDS (BC1, BC2, BC3, BC7 or uncompressed R8G8B8A8, with or without mipmaps), a Real Racing 3 game texture for a chosen GPU (ETC1 for every Android phone - Mali, Xclipse, PowerVR, Adreno; ATC for the Adreno build; RGBA4444 uncompressed), or the original file |
+   | Sounds   | WAV (PCM 16-bit), Ogg Vorbis (quality -1..10), MP3 / AAC / FLAC through ffmpeg.exe if you have it, or the original file |
+
+   A tick at the top writes everything exactly as the game stores it (what "Extract" did).
+   Other files (data, text, `.nct`, `.gui`, `.points` ...) keep the Save As dialog's list of
+   formats: text, decoded, or the original.
 
 5. **Select a model** and it appears in the 3D viewer:
 
@@ -162,17 +159,17 @@ The tool has its own code for DEFLATE, PNG (including Apple's iPhone PNGs), JPEG
 
 7. **The funnel icon → Convert everything shown...** does the whole list at once.
    To write only some assets, **Ctrl+click** rows to add or remove them and **Shift+click** to
-   take a range, then right-click the selection.
+   take a range, then right-click the selection or press the Export icon.
 
    A film (`.m4v`, `.mov`) plays in the viewer's place, with Play, Stop and a seek bar under it.
 
-8. **No menu bar: everything is an icon** above the preview, one row at one spacing, each with a
-   tooltip: open game, export, import, save, car creator, racing series, new track, install a car
-   mod, edit car points, Save Editor, encode .nct / .gui, **Show** (the funnel: all assets,
-   textures, 3D models or sounds) and **Options** (the gear: **Theme** Light / Dark,
-   vgmstream, LZHAM, About). The theme is remembered between runs; on first launch it follows
-   your Windows theme. Shortcuts: Ctrl+O open, Ctrl+S save, Ctrl+I import a picture, Ctrl+E Save
-   Editor, Ctrl+L show the file an asset is in (also on the tree's right-click menu).
+8. **No menu bar: everything is an icon**, in one row at the top left, over the search box and
+   the tree, each with a tooltip: open game, export, import, save, car creator, racing series,
+   new track, install a car mod, edit car points, Save Editor, encode .nct / .gui, **Show** (the
+   funnel: all assets, textures, 3D models or sounds) and **Options** (the gear: **Theme** Light /
+   Dark, vgmstream, LZHAM, About). The theme is remembered between runs; on first launch it
+   follows your Windows theme. Shortcuts: Ctrl+O open, Ctrl+S save, Ctrl+I import a picture,
+   Ctrl+E Save Editor, Ctrl+L show the file an asset is in (also on the tree's right-click menu).
 
 9. **Save Editor.** Its icon (the person with a pencil) or Ctrl+E opens the save editor in its own
    window, which you can keep open beside the tool. Pick the save folder (No
@@ -181,6 +178,9 @@ The tool has its own code for DEFLATE, PNG (including Apple's iPhone PNGs), JPEG
    * **Quick edit** has the usual fields: cash, gold, level, fuel and so on
      for No Limits; R$, Gold, M$ and driver level for Real Racing 3.
    * **All fields** lists everything in the save, with a search box.
+   * **Premium / VIP player**: a tick beside the player's name turns on (or off) every yes/no
+     flag in the save whose name says VIP, premium or subscriber. The flags are found by name,
+     so the box is greyed out when a save holds none; the list under "All fields" shows them.
    * **Saving**: every save first backs up the original files to a
      `save_editor_backup_<date>` folder beside them. The No Limits manifest
      hashes are updated, and so is Real Racing 3's `TempSaveGame.dat` copy.
@@ -197,6 +197,7 @@ monkeytool_cli list    <gameFolder>
 monkeytool_cli extract <gameFolder> <outFolder>
 monkeytool_cli convert <gameFolder> <outFolder> --tex png --mdl fbx
 monkeytool_cli one     <file.sb3d>  <out.obj>   --format obj
+monkeytool_cli export  <asset> <outBase> --model fbx --unit 2 --single-lod --tex dds --dds bc7 --audio ogg
 ```
 
 `--only textures|models|sounds` limits what gets written.

@@ -97,6 +97,7 @@ typedef unsigned long long ULONGLONG;
 #define BM_SETCHECK 0x00F1
 #define BM_GETCHECK 0x00F0
 #define BST_CHECKED 1
+#define BST_UNCHECKED 0
 #define PS_SOLID 0
 #define NULL_BRUSH 5
 #define FW_SEMIBOLD 600
@@ -117,6 +118,7 @@ typedef unsigned long long ULONGLONG;
 #define CB_ADDSTRING     0x0143
 #define CB_RESETCONTENT  0x014B
 #define CB_GETCURSEL     0x0147
+#define CB_GETDROPPEDSTATE 0x0157
 #define CB_SETCURSEL     0x014E
 #define CB_GETLBTEXT     0x0148
 #define CBN_SELCHANGE    1
@@ -181,6 +183,7 @@ typedef NMHDR* LPNMHDR;
 #define WS_OVERLAPPEDWINDOW 0x00CF0000
 #define WS_EX_CLIENTEDGE 0x200
 #define SS_LEFTNOWORDWRAP 0x0C
+#define SS_ENDELLIPSIS 0x4000
 #define CW_USEDEFAULT ((int)0x80000000)
 #define COLOR_WINDOW 5
 #define TRANSPARENT 1
@@ -308,6 +311,8 @@ LRESULT DispatchMessageW(const MSG*);
 WORD RegisterClassExW(const WNDCLASSEXW*);
 BOOL SetWindowTextW(HWND, LPCWSTR);
 int GetWindowTextW(HWND, LPWSTR, int);
+int GetClassNameW(HWND, LPWSTR, int);
+DWORD SearchPathW(LPCWSTR, LPCWSTR, LPCWSTR, DWORD, LPWSTR, LPWSTR*);
 #define WM_TIMER 0x0113
 #define WM_HSCROLL 0x0114
 #define WM_USER 0x0400

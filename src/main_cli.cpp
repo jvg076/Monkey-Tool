@@ -228,6 +228,11 @@ static void usage() {
 "  nfsnl extract <gameFolder> <outFolder>              raw .sba/.sb3d/.wem\n"
 "  nfsnl convert <gameFolder> <outFolder> [opts]       converted assets\n"
 "  nfsnl one     <assetFile>  <outFile>   --format F   convert a single file (models: fbx, obj, glb)\n"
+"  nfsnl export  <assetFile>  <outBase>  [opts]       as the Export window: --model fbx|obj|glb|raw\n"
+"                 --unit 0-4 (game, m, cm, mm, in) --single-lod --no-helpers --all-kits\n"
+"                 --tex png|jpg|bmp|tga|dds|rr3|raw --png-level 0-9 --jpg-quality N\n"
+"                 --dds bc1|bc2|bc3|bc7|rgba8 --no-mips --gpu etc|atc|4444 (rr3)\n"
+"                 --audio wav|ogg|raw --ogg-quality -1..10\n"
 "                (a No Limits car also takes --wheel wheel_<car>.sb3d and\n"
 "                 --kit stock|all|b|c... for one body kit, or every part shown)\n"
 "  nfsnl render  <modelFile>  <outPng>    [opts]       viewer frame to PNG\n"
@@ -1060,6 +1065,64 @@ int main(int argc, char** argv) {
         nlTintImage(img, mask, rgb);
         if (!writeFile(outPath, encodePng(img))) { printf("cannot write %s\n", outPath.c_str()); return 1; }
         printf("wrote %s\n", outPath.c_str());
+        return 0;
+    }
+
+    // export: one asset written as the GUI's Export window would with the same
+    // settings (formats, scale, compression)
+    if (cmd == "export") {
+        if (argc < 4) { usage(); return 1; }
+        std::string in = argv[2], outBase = argv[3];
+        ExportSettings s;
+        for (int i = 4; i < argc; ++i) {
+            std::string a = argv[i];
+            const char* v = i + 1 < argc ? argv[i + 1] : "";
+            auto take = [&]() { ++i; return std::string(v); };
+            if (a == "--model") s.modelFormat = take();
+            else if (a == "--unit") s.unit = atoi(take().c_str());
+            else if (a == "--single-lod") s.lods = 1;
+            else if (a == "--no-helpers") s.helpers = false;
+            else if (a == "--all-kits") s.kitAll = true;
+            else if (a == "--tex") s.textureFormat = take();
+            else if (a == "--png-level") s.pngLevel = atoi(take().c_str());
+            else if (a == "--jpg-quality") s.jpgQuality = atoi(take().c_str());
+            else if (a == "--dds") {
+                std::string d = take();
+                s.ddsFormat = d == "bc1" ? 0 : d == "bc2" ? 1 : d == "bc3" ? 2 : d == "bc7" ? 3 : 4;
+            }
+            else if (a == "--no-mips") s.mipmaps = false;
+            else if (a == "--gpu") {
+                std::string g = take();
+                s.rr3Gpu = g == "atc" ? 1 : g == "4444" ? 2 : 0;
+            }
+            else if (a == "--audio") s.audioFormat = take();
+            else if (a == "--ogg-quality") s.oggQuality = atoi(take().c_str());
+        }
+        Bytes data;
+        if (!readFile(in, data)) { printf("cannot read %s\n", in.c_str()); return 1; }
+        if (rr3IsContainer(in, data.data(), data.size())) {
+            Bytes inner;
+            std::string innerName;
+            if (rr3Unwrap(in, data.data(), data.size(), inner, &innerName, nullptr)) {
+                data.swap(inner);
+                in = innerName;
+            }
+        }
+        Bytes points;
+        std::string pointsPath = rr3PointsNameFor(in);
+        if (pointsPath != in) readFile(pointsPath, points);
+        Bytes out;
+        std::string ext, err;
+        bool ffmpeg = false;
+        if (!convertAssetWithSettings(in, data.data(), data.size(), s, out, ext, &err, &ffmpeg,
+                                      points.empty() ? nullptr : points.data(), points.size())) {
+            printf("failed: %s\n", err.c_str());
+            return 1;
+        }
+        std::string target = outBase + "." + ext;
+        if (!writeFile(target, out)) { printf("cannot write %s\n", target.c_str()); return 1; }
+        printf("wrote %s (%zu bytes)%s\n", target.c_str(), out.size(),
+               ffmpeg ? " - MP3 / AAC / FLAC need ffmpeg (the GUI runs it); this is the .wav" : "");
         return 0;
     }
 

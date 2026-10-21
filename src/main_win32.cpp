@@ -5035,10 +5035,45 @@ static bool nlDefaultRimColour(const std::string& texturePath, float rgb[3], std
     return true;
 }
 
+// the Export window (defined with the other tool windows below)
+static nfsnl::ExportSettings g_exportSettings;
+static bool exportSettingsDialog(HWND owner, unsigned kinds, bool rr3, bool nlCar, const std::wstring& what,
+                                 bool* asStored);
+static bool soundAs(const Bytes& wav, const nfsnl::ExportSettings& s, Bytes& out, std::string& ext);
+static bool haveFfmpeg(std::string* path);
+
 static void saveAsset(HWND owner, const Entry& e) {
     std::wstring filter;
     std::vector<std::string> formats;
-    buildFilter(e.path, filter, formats);
+    // Models, textures and sounds: the Export window first (format, scale,
+    // compression ...), then the file name. Everything else keeps the list of
+    // formats in the Save As dialog.
+    const unsigned kind = nfsnl::exportKindOf(e.path);
+    nfsnl::ExportSettings& es = g_exportSettings;
+    if (kind) {
+        bool rr3 = g_profile && g_profile->id == "real_racing_3";
+        bool nlCar = !nlCarIdFor(e.path).empty();
+        bool asStored = false;
+        if (!exportSettingsDialog(owner, kind, rr3, nlCar, L"Export " + widen(nfsnl::baseName(e.path)), &asStored))
+            return;
+        std::string f = asStored ? std::string("raw")
+                      : kind == 1 ? es.modelFormat
+                      : kind == 2 ? es.textureFormat
+                      : (es.audioFormat == "raw" ? std::string("raw") : std::string("wav"));
+        std::string own = nfsnl::extensionOf(e.path);
+        std::wstring label, pattern;
+        if (f == "raw") { label = L"Original file"; pattern = L"*." + widen(own); }
+        else if (f == "rr3") { label = L"Real Racing 3 texture"; pattern = L"*.dds.z"; }
+        else if (kind == 4) {
+            std::string a = es.audioFormat == "aac" ? std::string("m4a") : es.audioFormat;
+            label = widen(a) + L" sound"; pattern = L"*." + widen(a);
+        } else { label = widen(f) + L" file"; pattern = L"*." + widen(f); }
+        filter = label + L" (" + pattern + L")" + std::wstring(1, L'\0') + pattern + std::wstring(1, L'\0') +
+                 L"All files (*.*)" + std::wstring(1, L'\0') + L"*.*" + std::wstring(1, L'\0');
+        formats = { f, f };
+    } else {
+        buildFilter(e.path, filter, formats);
+    }
 
     std::string stem = nfsnl::stripExtension(nfsnl::baseName(e.path));
     std::wstring name = widen(stem);
@@ -5053,7 +5088,12 @@ static void saveAsset(HWND owner, const Entry& e) {
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = L"Save asset as";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    std::wstring defExt = widen(formats.empty() ? "bin" : formats[0]);
+    std::string defExtA = formats.empty() ? std::string("bin") : formats[0];
+    if (defExtA == "raw") defExtA = nfsnl::extensionOf(e.path);
+    else if (defExtA == "rr3") defExtA = "z";
+    else if (kind == 4 && defExtA == "wav" && es.audioFormat != "wav")
+        defExtA = es.audioFormat == "aac" ? std::string("m4a") : es.audioFormat;
+    std::wstring defExt = widen(defExtA);
     ofn.lpstrDefExt = defExt.c_str();
 
     if (!GetSaveFileNameW(&ofn)) return;
@@ -5098,14 +5138,19 @@ static void saveAsset(HWND owner, const Entry& e) {
                 if (wantWav && en.kind == "wem") {
                     Bytes out;
                     if (soundToWav(p, en.size, out)) {
-                        if (nfsnl::writeFile(stem + ".wav", out)) wav++;
+                        Bytes enc;
+                        std::string ex;
+                        soundAs(out, es, enc, ex);
+                        if (nfsnl::writeFile(stem + "." + ex, enc)) wav++;
                         continue;
                     }
                 }
                 // an engine bank: the original, and a .wav to listen to
                 if (en.kind == "gnsu") {
-                    Bytes out;
-                    if (nfsnl::gnsuToWav(p, en.size, out) && nfsnl::writeFile(stem + ".wav", out))
+                    Bytes out, enc;
+                    std::string ex;
+                    if (nfsnl::gnsuToWav(p, en.size, out) && soundAs(out, es, enc, ex) &&
+                        nfsnl::writeFile(stem + "." + ex, enc))
                         wav++;
                 }
                 std::string ext = en.kind == "gnsu" ? "gnsu"
@@ -5137,9 +5182,10 @@ static void saveAsset(HWND owner, const Entry& e) {
         if (fmt == "wav" && (se == "ogg" || se == "mp3" || se == "flac" || se == "m4a" ||
                              se == "aac" || se == "opus" || se == "wma" || se == "fsb" ||
                              se == "xma" || se == "adx" || se == "at3")) {
-            Bytes wav;
-            if (runVgmstream(data, wav, "." + se)) {
-                std::string target = nfsnl::stripExtension(narrow(std::wstring(&name[0]))) + ".wav";
+            Bytes wav0, wav;
+            std::string ex = "wav";
+            if (runVgmstream(data, wav0, "." + se) && soundAs(wav0, es, wav, ex)) {
+                std::string target = nfsnl::stripExtension(narrow(std::wstring(&name[0]))) + "." + ex;
                 if (nfsnl::writeFile(target, wav)) {
                     setStatus("Saved " + target);
                     return;
@@ -5159,7 +5205,11 @@ static void saveAsset(HWND owner, const Entry& e) {
             askForVgmstream(owner);
         if (!nfsnl::wemToWav(data.data(), data.size(), wav, &why) &&
             runVgmstream(data, wav)) {
-            std::string target = nfsnl::stripExtension(narrow(std::wstring(&name[0]))) + ".wav";
+            Bytes enc;
+            std::string ex;
+            soundAs(wav, es, enc, ex);
+            wav.swap(enc);
+            std::string target = nfsnl::stripExtension(narrow(std::wstring(&name[0]))) + "." + ex;
             if (nfsnl::writeFile(target, wav)) {
                 char msg[MAX_PATH + 96];
                 snprintf(msg, sizeof(msg), "Saved %u bytes to %s (via vgmstream)",
@@ -5258,25 +5308,13 @@ static void saveAsset(HWND owner, const Entry& e) {
                     }
                 }
                 // Body kits (No Limits): the version the viewer shows, or
-                // every kit's parts. Before, every kit but stock came in
-                // hidden, and most programs left the hidden parts out.
+                // every kit's parts - as the Export window says
                 {
                     std::string kits = nfsnl::modelKits(m);
                     if (!kits.empty()) {
                         std::string kit = g_viewPath == e.path ? g_view.kit : std::string("stock");
                         if (kit.empty()) kit = "stock";
-                        std::wstring label = kit == "stock" ? std::wstring(L"Stock")
-                                           : kit == "all" ? std::wstring(L"All parts")
-                                           : L"Kit " + std::wstring(1, (wchar_t)(kit[0] - 'a' + 'A'));
-                        std::wstring list;
-                        for (char c : kits) list += (list.empty() ? L"" : L", ") + std::wstring(1, (wchar_t)(c - 'a' + 'A'));
-                        std::wstring q = L"This car has body kits (" + list + L").\n\n"
-                                         L"Yes - export the version the viewer shows: " + label +
-                                         L"\n       (pick another in the kit list under the view first)\n"
-                                         L"No - export every part of every kit, all visible (they sit on top of each other)";
-                        int a = MessageBoxW(owner, q.c_str(), L"Export body kit", MB_YESNOCANCEL | MB_ICONQUESTION);
-                        if (a == IDCANCEL) return;
-                        nfsnl::keepKit(m, a == IDYES ? kit : std::string("all"));
+                        nfsnl::keepKit(m, es.kitAll ? std::string("all") : kit);
                     }
                 }
                 // A No Limits track with a limited-time layer shown in the
@@ -5305,15 +5343,7 @@ static void saveAsset(HWND owner, const Entry& e) {
                         } else {
                             paint = nlStockPaint(car, &label);
                         }
-                        if (paint.any()) {
-                            std::wstring q = L"Export the rims, brake calipers and body in the car's painted colours?\n\n"
-                                             L"Yes - painted, as in the game (" + widen(label) + L" setup: " +
-                                             widen(nlPaintSummary(paint)) + L")\n"
-                                             L"No - the textures' default colours";
-                            int a = MessageBoxW(owner, q.c_str(), L"Export colours", MB_YESNOCANCEL | MB_ICONQUESTION);
-                            if (a == IDCANCEL) return;
-                            if (a == IDYES) nfsnl::nlApplyCarPaint(m, paint);
-                        }
+                        if (paint.any() && es.paint) nfsnl::nlApplyCarPaint(m, paint);
                     }
                 }
                 // The textures the model uses, found in the library: offered
@@ -5346,35 +5376,29 @@ static void saveAsset(HWND owner, const Entry& e) {
                     leaves.insert(png);
                     leafFor[t] = png;
                 }
-                if (!leafFor.empty() && fmt != "glb") {     // a .glb takes them inside, unasked
-                    std::wstring q = L"Export the " + std::to_wstring(leafFor.size()) +
-                                     L" texture(s) this model uses as well?\n\n"
-                                     L"Yes - the model and its textures, as PNG files in the "
-                                     L"same folder, already linked to the model.\n"
-                                     L"No - the model only.";
-                    int a = MessageBoxW(owner, q.c_str(), L"Export textures",
-                                        MB_YESNOCANCEL | MB_ICONQUESTION);
-                    if (a == IDCANCEL) return;
-                    if (a == IDYES) {
-                        for (auto& mesh : m.meshes) {
-                            auto it = leafFor.find(mesh.texture);
-                            if (it != leafFor.end()) mesh.texture = it->second;
-                        }
-                        for (auto& mt : m.materials) {
-                            auto it = leafFor.find(mt.diffuse);
-                            if (it != leafFor.end()) mt.diffuse = it->second;
-                        }
-                        exportTextures.assign(leafFor.begin(), leafFor.end());
-                        embeddedTextures = m.images;
+                if (!leafFor.empty() && fmt != "glb" && es.modelTextures) {   // a .glb takes them inside
+                    for (auto& mesh : m.meshes) {
+                        auto it = leafFor.find(mesh.texture);
+                        if (it != leafFor.end()) mesh.texture = it->second;
                     }
+                    for (auto& mt : m.materials) {
+                        auto it = leafFor.find(mt.diffuse);
+                        if (it != leafFor.end()) mt.diffuse = it->second;
+                    }
+                    exportTextures.assign(leafFor.begin(), leafFor.end());
+                    embeddedTextures = m.images;
                 }
+                // levels, helpers and scale, as the Export window says
+                nfsnl::applyModelExportSettings(m, es);
                 if (fmt == "glb") {
                     // one file: every texture decoded and put inside as PNG
                     std::vector<nfsnl::Image> own = m.images;
                     HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+                    bool withTex = es.modelTextures;
                     wroteModel = nfsnl::writeGlb(m, out, [&](const std::string& ref) {
                         nfsnl::Image img;
-                        return imageForTextureRef(ref, own, img) ? nfsnl::encodePng(img) : Bytes();
+                        return withTex && imageForTextureRef(ref, own, img) ? nfsnl::encodePngLevel(img, es.pngLevel)
+                                                                             : Bytes();
                     }, &glbNote, nfsnl::stripExtension(nfsnl::baseName(e.path)));
                     SetCursor(old);
                     if (wroteModel) usedExt = fmt;
@@ -5392,16 +5416,27 @@ static void saveAsset(HWND owner, const Entry& e) {
     }
     // A No Limits texture: a UI texture pack's pictures one by one, and a rim
     // or brake caliper painted the colour the game gives it
-    if (!wroteModel && nfsnl::extensionOf(e.path) == "sba" &&
-        (fmt == "png" || fmt == "jpg" || fmt == "bmp" || fmt == "tga")) {
+    if (!wroteModel && nfsnl::extensionOf(e.path) == "sba" && kind == 2 &&
+        (fmt == "png" || fmt == "jpg" || fmt == "bmp" || fmt == "tga" || fmt == "dds" || fmt == "rr3")) {
+        std::string encExt = fmt;
         auto encode = [&](const nfsnl::Image& img) {
-            if (fmt == "jpg") return nfsnl::encodeJpeg(img, 92);
-            if (fmt == "bmp") return nfsnl::encodeBmp(img);
-            if (fmt == "tga") return nfsnl::encodeTga(img);
-            return nfsnl::encodePng(img);
+            Bytes b;
+            nfsnl::encodeImageAs(img, es, b, encExt);
+            return b;
         };
         std::string target = narrow(std::wstring(&name[0]));
-        if (nfsnl::extensionOf(target) != fmt) target = nfsnl::stripExtension(target) + "." + fmt;
+        {
+            // the ending the encoder gives (rr3: .etc.dds.z / .atc.dds.z)
+            nfsnl::Image probe;
+            probe.width = probe.height = 4; probe.channels = 4; probe.pixels.assign(64, 255);
+            encode(probe);
+            std::string t = target;
+            if (nfsnl::extensionOf(t) == "z") t = nfsnl::stripExtension(t);
+            while (nfsnl::extensionOf(t) == "dds" || nfsnl::extensionOf(t) == "etc" || nfsnl::extensionOf(t) == "atc" ||
+                   nfsnl::extensionOf(t) == fmt)
+                t = nfsnl::stripExtension(t);
+            target = t + "." + encExt;
+        }
         std::vector<nfsnl::NamedImage> pics = nfsnl::texturePackPictures(data.data(), data.size());
         if (pics.size() > 1) {
             std::wstring q = L"This is a UI texture pack with " + std::to_wstring(pics.size()) +
@@ -5458,6 +5493,20 @@ static void saveAsset(HWND owner, const Entry& e) {
             }
         }
     }
+    // the other textures, and sounds the steps above did not take: as the
+    // Export window says
+    if (!wroteModel && (kind == 2 || kind == 4) && fmt != "raw") {
+        bool ff = false;
+        if (nfsnl::convertAssetWithSettings(e.path, data.data(), data.size(), es, out, usedExt, &err, &ff) &&
+            !out.empty()) {
+            if (ff) {
+                Bytes enc;
+                std::string ex;
+                if (soundAs(out, es, enc, ex)) { out.swap(enc); usedExt = ex; }
+            }
+            wroteModel = true;          // written below under its own ending
+        }
+    }
     if (!wroteModel &&
         (!nfsnl::convertAsset(e.path, data.data(), data.size(), fmt, out, &err, &usedExt,
                               points.empty() ? nullptr : points.data(), points.size()) ||
@@ -5472,7 +5521,14 @@ static void saveAsset(HWND owner, const Entry& e) {
     // name the file after what the data actually is; when a payload could not
     // be decoded this differs from the requested format
     std::string want = usedExt.empty() ? fmt : usedExt;
-    if (!want.empty() && nfsnl::extensionOf(target) != want)
+    if (!want.empty() && want.find('.') != std::string::npos) {
+        // a compound ending (etc.dds.z): the name loses whatever endings it had
+        std::string t = target;
+        for (int k = 0; k < 4 && !nfsnl::extensionOf(t).empty() &&
+                        want.find(nfsnl::extensionOf(t)) != std::string::npos; ++k)
+            t = nfsnl::stripExtension(t);
+        target = t + "." + want;
+    } else if (!want.empty() && nfsnl::extensionOf(target) != want)
         target = nfsnl::stripExtension(target) + "." + want;
 
     if (!nfsnl::writeFile(target, out)) {
@@ -5490,7 +5546,7 @@ static void saveAsset(HWND owner, const Entry& e) {
         for (const auto& t : exportTextures) {
             nfsnl::Image img;
             bool have = imageForTextureRef(t.first, embeddedTextures, img);
-            Bytes png = have ? nfsnl::encodePng(img) : Bytes();
+            Bytes png = have ? nfsnl::encodePngLevel(img, es.pngLevel) : Bytes();
             if (!png.empty() && nfsnl::writeFile(dir + t.second, png)) ++ok; else ++bad;
         }
         SetCursor(old);
@@ -5578,6 +5634,7 @@ struct ExportJob {
     std::string outDir;
     std::string strip;       // folder prefix left out of the written paths
     bool convert = false;
+    nfsnl::ExportSettings settings;   // what the Export window said
 };
 
 static std::string exportFormatFor(const std::string& path) {
@@ -5622,12 +5679,17 @@ static DWORD WINAPI exportThreadProc(LPVOID param) {
         std::string usedExt, err;
         std::string ext = nfsnl::extensionOf(e.path);
         if (job->convert) {
-            std::string fmt = exportFormatFor(e.path);
             try {
-                if (!nfsnl::convertAsset(e.path, data.data(), data.size(), fmt, out, &err, &usedExt) ||
+                bool ff = false;
+                if (!nfsnl::convertAssetWithSettings(e.path, data.data(), data.size(), job->settings, out,
+                                                     usedExt, &err, &ff) ||
                     out.empty()) {
                     out = data;          // keep the file rather than lose it
                     usedExt = ext;
+                } else if (ff) {
+                    Bytes enc;
+                    std::string ex;
+                    if (soundAs(out, job->settings, enc, ex)) { out.swap(enc); usedExt = ex; }
                 }
             } catch (...) {
                 out = data;
@@ -5640,7 +5702,17 @@ static DWORD WINAPI exportThreadProc(LPVOID param) {
         if (!job->strip.empty() && rel.compare(0, job->strip.size(), job->strip) == 0)
             rel.erase(0, job->strip.size());
         while (!rel.empty() && rel[0] == '/') rel.erase(0, 1);
-        if (!usedExt.empty() && usedExt != ext) rel = nfsnl::stripExtension(rel) + "." + usedExt;
+        if (!usedExt.empty() && usedExt != ext) {
+            if (usedExt.find('.') != std::string::npos) {
+                // etc.dds.z: whatever endings the name had go
+                for (int k = 0; k < 4 && !nfsnl::extensionOf(rel).empty() &&
+                                usedExt.find(nfsnl::extensionOf(rel)) != std::string::npos; ++k)
+                    rel = nfsnl::stripExtension(rel);
+                rel += "." + usedExt;
+            } else {
+                rel = nfsnl::stripExtension(rel) + "." + usedExt;
+            }
+        }
         for (auto& c : rel) if (c == '/') c = '\\';
         if (nfsnl::writeFile(job->outDir + "\\" + rel, out)) ++written;
         else {
@@ -5663,6 +5735,20 @@ static void startExport(HWND owner, std::vector<int> entries, const std::string&
         MessageBoxW(owner, L"There is nothing to write here.", L"Monkey Tool", MB_ICONINFORMATION);
         return;
     }
+    // the Export window first, for every kind of asset in the job
+    unsigned kinds = 0;
+    for (size_t i = 0; i < entries.size() && kinds != 7; ++i) kinds |= nfsnl::exportKindOf(g_all[entries[i]].path);
+    {
+        bool rr3 = g_profile && g_profile->id == "real_racing_3";
+        bool nlCar = false;
+        for (size_t i = 0; i < entries.size() && i < 2000 && !nlCar; ++i)
+            nlCar = !nlCarIdFor(g_all[entries[i]].path).empty();
+        bool asStored = !convert;
+        std::wstring what = L"Export " + std::to_wstring(entries.size()) + L" asset(s)" +
+                            (strip.empty() ? std::wstring() : L" from " + widen(strip));
+        if (!exportSettingsDialog(owner, kinds ? kinds : 7, rr3, nlCar, what, &asStored)) return;
+        convert = !asStored;
+    }
     std::string outDir;
     if (!pickFolder(owner, convert ? L"Choose a folder for the exported files"
                                    : L"Choose a folder for the extracted files", outDir))
@@ -5674,6 +5760,7 @@ static void startExport(HWND owner, std::vector<int> entries, const std::string&
     job->outDir = outDir;
     job->strip = strip;
     job->convert = convert;
+    job->settings = g_exportSettings;
     g_busy = true;
     logLine("export: %u asset(s) to %s (%s)", (unsigned)job->entries.size(), outDir.c_str(),
             convert ? "converted" : "as they are");
@@ -5737,7 +5824,7 @@ static void showMultiStatus() {
     std::string strip;
     size_t n = selectedEntries(&strip).size();
     char b[200];
-    snprintf(b, sizeof(b), "%u rows selected (%u asset(s)) - right-click or File > Export selected to save them all.",
+    snprintf(b, sizeof(b), "%u rows selected (%u asset(s)) - right-click or the Export icon to save them all.",
              (unsigned)g_multi.size(), (unsigned)n);
     setStatus(b);
 }
@@ -5777,9 +5864,7 @@ static void treeContextMenu(HWND hwnd) {
         std::string strip;
         size_t n = selectedEntries(&strip).size();
         HMENU menu = CreatePopupMenu();
-        std::wstring a = L"Extract the selected assets (" + std::to_wstring(n) + L")...";
-        std::wstring b = L"Export the selected assets - PNG, FBX, WAV (" + std::to_wstring(n) + L")...";
-        AppendMenuW(menu, MF_STRING, ID_CTX_SEL_EXTRACT, a.c_str());
+        std::wstring b = L"Export the selected assets (" + std::to_wstring(n) + L")...";
         AppendMenuW(menu, MF_STRING, ID_CTX_SEL_CONVERT, b.c_str());
         int cmd = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, hwnd, nullptr);
         DestroyMenu(menu);
@@ -5792,13 +5877,10 @@ static void treeContextMenu(HWND hwnd) {
     HMENU menu = CreatePopupMenu();
     if (dir != g_itemToDir.end()) {
         size_t n = entriesUnder(dir->second).size();
-        std::wstring a = L"Extract all assets from this folder (" + std::to_wstring(n) + L")...";
-        std::wstring b = L"Export all assets from this folder - PNG, FBX, WAV (" +
-                         std::to_wstring(n) + L")...";
-        AppendMenuW(menu, MF_STRING, ID_CTX_EXTRACT, a.c_str());
+        std::wstring b = L"Export this folder (" + std::to_wstring(n) + L" assets)...";
         AppendMenuW(menu, MF_STRING, ID_CTX_CONVERT, b.c_str());
     } else if (ent != g_itemToEntry.end()) {
-        AppendMenuW(menu, MF_STRING, ID_CTX_SAVE, L"Save as...");
+        AppendMenuW(menu, MF_STRING, ID_CTX_SAVE, L"Export...");
         AppendMenuW(menu, MF_STRING, ID_TOOLS_SHOW_SOURCE, L"Show the file this asset is in\tCtrl+L");
     } else {
         DestroyMenu(menu);
@@ -6104,7 +6186,7 @@ static void paintSplash(HWND hwnd, HDC target) {
     SelectObject(dc, mid);
     SetTextColor(dc, RGB(0xB8, 0xB8, 0xC0));
     TextOutW(dc, 168, 120, L"by GM25", 7);
-    TextOutW(dc, 36, 196, L"1.3.0", 5);
+    TextOutW(dc, 36, 196, L"1.3.1", 5);
     if (g_profile) {
         std::wstring gn = widen(g_profile->name);
         TextOutW(dc, 36, 218, gn.c_str(), (int)gn.size());
@@ -6228,11 +6310,24 @@ static void layout(HWND hwnd) {
     GetClientRect(hwnd, &rc);
     int statusH = 22;
     int treeW = (rc.right - rc.left) * 45 / 100;
-    // A strip across the top: the search box exactly over the tree - same
-    // left edge, same width - and the tool buttons over the preview.
-    int searchH = 38;
-    MoveWindow(g_searchBox, 0, 7, treeW, 24, TRUE);
-    // Name | Ext | Size | Date, over the tree
+    // Left column, top to bottom: the icons (every command - there is no
+    // menu bar), the search box, the Name | Ext | Size | Date headers and
+    // the tree. The preview takes the whole height on the right.
+    // Icon order: the files (open, export, import, save), the Real Racing 3
+    // editors (car creator, racing series, new track, car mod, points), the
+    // Save Editor, encode, then the asset filter and the options.
+    const int barTop = 3, iconH = 34, step = 40;
+    int rowEnd = 4;
+    {
+        HWND row[] = { g_tbOpen, g_tbExport, g_tbImport, g_tbSave, g_tbCreator, g_tbSeries, g_tbTrack,
+                       g_tbMod, g_tbPoints, g_saveEdBtn, g_tbEncode, g_tbFilter, g_tbOptions };
+        int x = 4;
+        for (HWND b : row) { if (b) MoveWindow(b, x, barTop, 36, iconH, TRUE); x += step; }
+        rowEnd = x;
+    }
+    int searchTop = barTop + iconH + 5;
+    MoveWindow(g_searchBox, 0, searchTop, treeW, 24, TRUE);
+    int searchH = searchTop + 24 + 4;           // where the headers start
     int colH = 20;
     int wName = treeW - 3 * 80;
     int cx = 0;
@@ -6242,25 +6337,15 @@ static void layout(HWND hwnd) {
         cx += widths[k];
     }
     MoveWindow(g_tree, 0, searchH + colH, treeW, rc.bottom - statusH - searchH - colH, TRUE);
-    // There is no menu bar: every command is one of these icons, in one row
-    // at one even step - the files (open, export, import, save), the Real
-    // Racing 3 editors (car creator, racing series, new track, car mod,
-    // points), the Save Editor, encode, then the asset filter and the
-    // options. (The old New car button lives on inside the car creator.)
-    {
-        const int step = 40;
-        HWND row[] = { g_tbOpen, g_tbExport, g_tbImport, g_tbSave, g_tbCreator, g_tbSeries, g_tbTrack,
-                       g_tbMod, g_tbPoints, g_saveEdBtn, g_tbEncode, g_tbFilter, g_tbOptions };
-        int x = treeW + 4;
-        for (HWND b : row) { if (b) MoveWindow(b, x, 2, 36, 34, TRUE); x += step; }
-    }
+    // a narrow window: the icons run past the tree, so the preview starts below them
+    int previewTop = rowEnd > treeW ? barTop + iconH + 4 : 0;
     int barW = 190;
     bool barUp = IsWindowVisible(g_progress) != 0;
     MoveWindow(g_status, 0, rc.bottom - statusH,
                barUp ? std::max(40L, rc.right - barW - 8) : rc.right, statusH, TRUE);
     MoveWindow(g_progress, rc.right - barW - 4, rc.bottom - statusH + 3, barW, statusH - 6, TRUE);
     g_previewRect.left = treeW + 1;
-    g_previewRect.top = searchH;
+    g_previewRect.top = previewTop;
     g_previewRect.right = rc.right;
     g_previewRect.bottom = rc.bottom - statusH;
 
@@ -6336,6 +6421,7 @@ static void importDataIntoSelected(HWND hwnd, const Entry& e);
 // Export: the selected asset through the Save As dialog (every format it
 // can become, and the file itself), or a whole folder converted
 static void exportSelected(HWND hwnd) {
+    if (g_multi.size() >= 2) { exportSelected(hwnd, true); return; }   // several rows picked
     HTREEITEM sel = TreeView_GetSelection(g_tree);
     auto ent = g_itemToEntry.find(sel);
     if (ent != g_itemToEntry.end() && ent->second >= 0 && (size_t)ent->second < g_all.size()) {
@@ -6470,7 +6556,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                      WS_CHILD, 0, 0, 100, 16, hwnd,
                                      (HMENU)IDC_PROGRESS, g_inst, nullptr);
         SendMessageW(g_progress, PBM_SETRANGE32, 0, 1000);
-        g_status = CreateWindowExW(0, L"STATIC", L"Monkey Tool 1.3.0 - choose a game to begin.",
+        g_status = CreateWindowExW(0, L"STATIC", L"Monkey Tool 1.3.1 - choose a game to begin.",
                                    WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
                                    0, 0, 100, 20, hwnd, (HMENU)IDC_STATUS, g_inst, nullptr);
         // viewer controls; hidden until a model is selected
@@ -7292,7 +7378,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case ID_HELP_ABOUT:
             MessageBoxW(hwnd,
-                L"Monkey Tool 1.3.0\n\n"
+                L"Monkey Tool 1.3.1\n\n"
                 L"Games: NFS No Limits, No Limits VR, Edge, Most Wanted,\n"
                 L"Hot Pursuit; Real Racing Next, 3, 2, Real Racing and GTI.\n\n"
                 L"Need for Speed: No Limits - unpacks the .pack archives and\n"
@@ -7607,7 +7693,7 @@ static void paintPicker(HWND hwnd, HDC target) {
     SelectObject(hdc, small);
     SetTextColor(hdc, dim);
     RECT vr{kPickSide + 110, rc.bottom - kPickFooter, rc.right - kPickSide - 110, rc.bottom};
-    DrawTextW(hdc, L"Monkey Tool 1.3.0 by GM25", -1, &vr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(hdc, L"Monkey Tool 1.3.1 by GM25", -1, &vr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(hdc, oldFont);
     DeleteObject(title);
@@ -7835,7 +7921,7 @@ static void openGameBody(HWND hwnd, bool askProfile) {
         }
     }
     g_gameFolder = folder;
-    std::wstring caption = L"Monkey Tool 1.3.0 - " + widen(g_profile->name);
+    std::wstring caption = L"Monkey Tool 1.3.1 - " + widen(g_profile->name);
     SetWindowTextW(hwnd, caption.c_str());
     setStatus("");
     startIndexThread(folder);
@@ -8224,7 +8310,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
                     L"Monkey Tool", MB_ICONERROR);
         ExitProcess(3);
     });
-    logLine("---- Monkey Tool 1.3.0 starting ----");
+    logLine("---- Monkey Tool 1.3.1 starting ----");
     findLzham();
     logLine("codecs: zstd %s, LZHAM %s",
             nfsnl::zstdAvailable() ? "yes" : "missing",
@@ -8248,7 +8334,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     wc.lpszClassName = L"MonkeyTool";
     RegisterClassExW(&wc);
 
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"Monkey Tool 1.3.0",
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"Monkey Tool 1.3.1",
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                              1100, 700, nullptr, nullptr, inst, nullptr);
     // also set them on the window itself - a class icon alone is not always
@@ -8361,7 +8447,7 @@ static void updateToolbarState() {
     if (g_tbMod) EnableWindow(g_tbMod, rr3 && !g_busy ? TRUE : FALSE);
     if (g_tbPoints) EnableWindow(g_tbPoints, rr3 && !g_busy ? TRUE : FALSE);
     if (g_main) {
-        std::wstring caption = L"Monkey Tool 1.3.0";
+        std::wstring caption = L"Monkey Tool 1.3.1";
         if (g_profile) caption += L" - " + widen(g_profile->name);
         if (!g_pending.empty()) caption += L"  *";
         SetWindowTextW(g_main, caption.c_str());
@@ -8647,6 +8733,464 @@ static bool ttMessage(ToolTheme& t, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, L
     return false;
 }
 
+// ---- the Export window (Frosty's "Mesh Export Settings", for everything):
+// asked once, before the file or folder is chosen, for the whole job -
+// models (format, scale, detail levels, helpers, textures, kits, colours),
+// textures (format, PNG level, JPG quality, DDS compression, mipmaps, Real
+// Racing 3's GPU) and sounds (WAV, Ogg Vorbis; MP3 / AAC / FLAC by ffmpeg).
+// The choices are remembered between runs. ----
+static bool g_exportSettingsLoaded = false;
+
+static std::string regReadString(const wchar_t* name) {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\MonkeyTool", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return std::string();
+    wchar_t buf[2048] = {0};
+    DWORD size = sizeof(buf) - sizeof(wchar_t), type = 0;
+    LONG r = RegQueryValueExW(key, name, nullptr, &type, (LPBYTE)buf, &size);
+    RegCloseKey(key);
+    if (r != ERROR_SUCCESS || type != REG_SZ) return std::string();
+    return narrow(buf);
+}
+static void regWriteString(const wchar_t* name, const std::string& value) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\MonkeyTool", 0, nullptr, 0, KEY_WRITE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) return;
+    std::wstring w = widen(value);
+    RegSetValueExW(key, name, 0, REG_SZ, (const BYTE*)w.c_str(), (DWORD)((w.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+}
+
+static void loadExportSettings() {
+    if (g_exportSettingsLoaded) return;
+    g_exportSettingsLoaded = true;
+    std::string t = regReadString(L"ExportSettings");
+    nfsnl::ExportSettings& s = g_exportSettings;
+    size_t p = 0;
+    while (p < t.size()) {
+        size_t e = t.find(';', p);
+        if (e == std::string::npos) e = t.size();
+        std::string kv = t.substr(p, e - p);
+        p = e + 1;
+        size_t eq = kv.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+        int n = atoi(v.c_str());
+        if (k == "model") s.modelFormat = v;
+        else if (k == "unit") s.unit = n;
+        else if (k == "lods") s.lods = n;
+        else if (k == "helpers") s.helpers = n != 0;
+        else if (k == "mtex") s.modelTextures = n != 0;
+        else if (k == "kitall") s.kitAll = n != 0;
+        else if (k == "paint") s.paint = n != 0;
+        else if (k == "tex") s.textureFormat = v;
+        else if (k == "png") s.pngLevel = n;
+        else if (k == "jpg") s.jpgQuality = n;
+        else if (k == "dds") s.ddsFormat = n;
+        else if (k == "mips") s.mipmaps = n != 0;
+        else if (k == "gpu") s.rr3Gpu = n;
+        else if (k == "audio") s.audioFormat = v;
+        else if (k == "oggq") s.oggQuality = n;
+        else if (k == "kbps") s.mp3Kbps = n;
+    }
+}
+static void saveExportSettings() {
+    const nfsnl::ExportSettings& s = g_exportSettings;
+    char b[512];
+    snprintf(b, sizeof(b),
+             "model=%s;unit=%d;lods=%d;helpers=%d;mtex=%d;kitall=%d;paint=%d;tex=%s;png=%d;jpg=%d;dds=%d;"
+             "mips=%d;gpu=%d;audio=%s;oggq=%d;kbps=%d",
+             s.modelFormat.c_str(), s.unit, s.lods, s.helpers, s.modelTextures, s.kitAll, s.paint,
+             s.textureFormat.c_str(), s.pngLevel, s.jpgQuality, s.ddsFormat, s.mipmaps, s.rr3Gpu,
+             s.audioFormat.c_str(), s.oggQuality, s.mp3Kbps);
+    regWriteString(L"ExportSettings", b);
+}
+
+// ffmpeg.exe for MP3, AAC and FLAC: beside the program, in an ffmpeg folder
+// there, where the user pointed once, or on the PATH
+static bool haveFfmpeg(std::string* path) {
+    std::string saved = regReadString(L"FfmpegPath");
+    if (!saved.empty() && GetFileAttributesW(widen(saved).c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (path) *path = saved;
+        return true;
+    }
+    std::wstring base = widen(exeFolder());
+    for (const wchar_t* tail : { L"\\ffmpeg.exe", L"\\ffmpeg\\ffmpeg.exe", L"\\ffmpeg\\bin\\ffmpeg.exe",
+                                 L"\\tools\\ffmpeg.exe", L"\\tools\\ffmpeg\\bin\\ffmpeg.exe" }) {
+        std::wstring cand = base + tail;
+        if (GetFileAttributesW(cand.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        if (path) *path = narrow(cand);
+        return true;
+    }
+    wchar_t found[MAX_PATH];
+    if (SearchPathW(nullptr, L"ffmpeg.exe", nullptr, MAX_PATH, found, nullptr)) {
+        if (path) *path = narrow(found);
+        return true;
+    }
+    return false;
+}
+static bool askForFfmpeg(HWND owner) {
+    if (MessageBoxW(owner,
+            L"MP3, AAC and FLAC are written by ffmpeg, which is not part of Monkey Tool (MP3 and AAC "
+            L"encoders carry their own licences).\n\n"
+            L"If you have ffmpeg.exe (ffmpeg.org, \"essentials\" build), point at it now and it will be "
+            L"used from here on. Without it the sounds are written as .wav.\n\nLocate ffmpeg.exe now?",
+            L"ffmpeg", MB_ICONQUESTION | MB_YESNO) != IDYES)
+        return false;
+    wchar_t file[MAX_PATH] = L"ffmpeg.exe";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"ffmpeg.exe\0ffmpeg.exe\0Programs (*.exe)\0*.exe\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Where is ffmpeg.exe?";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return false;
+    regWriteString(L"FfmpegPath", narrow(std::wstring(file)));
+    return true;
+}
+// a .wav to MP3 / AAC (.m4a) / FLAC through ffmpeg; `ext` gets the ending
+static bool runFfmpeg(const Bytes& wav, const nfsnl::ExportSettings& s, Bytes& out, std::string& ext) {
+    std::string tool;
+    if (!haveFfmpeg(&tool)) return false;
+    ext = s.audioFormat == "aac" ? "m4a" : s.audioFormat;
+    ScratchFile in(".wav"), res("." + ext);
+    if (!in.write(wav)) return false;
+    DeleteFileW(widen(res.path).c_str());
+    std::wstring codec = s.audioFormat == "mp3" ? L"-c:a libmp3lame -b:a " + std::to_wstring(s.mp3Kbps) + L"k"
+                       : s.audioFormat == "aac" ? L"-c:a aac -b:a " + std::to_wstring(s.mp3Kbps) + L"k"
+                       : std::wstring(L"-c:a flac");
+    std::wstring cmd = L"\"" + widen(tool) + L"\" -hide_banner -loglevel error -y -i \"" + widen(in.path) +
+                       L"\" " + codec + L" \"" + widen(res.path) + L"\"";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+        return false;
+    WaitForSingleObject(pi.hProcess, 120000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return nfsnl::readFile(res.path, out) && !out.empty();
+}
+// a decoded sound in the settings' audio format; `ext` gets the ending
+static bool soundAs(const Bytes& wav, const nfsnl::ExportSettings& s, Bytes& out, std::string& ext) {
+    if (s.audioFormat == "ogg") {
+        std::string err;
+        if (nfsnl::wavToOgg(wav, s.oggQuality, out, &err)) { ext = "ogg"; return true; }
+    } else if (s.audioFormat == "mp3" || s.audioFormat == "aac" || s.audioFormat == "flac") {
+        if (runFfmpeg(wav, s, out, ext)) return true;
+    }
+    out = wav;
+    ext = "wav";
+    return true;
+}
+
+namespace {
+const char* const kModelFormats[] = { "fbx", "obj", "glb", "raw" };
+const wchar_t* const kModelFormatNames[] = { L"FBX (.fbx)", L"Wavefront OBJ (.obj + .mtl)",
+                                             L"glTF 2.0 binary (.glb, textures inside)",
+                                             L"Original file, as the game stores it" };
+const char* const kTexFormats[] = { "png", "jpg", "bmp", "tga", "dds", "rr3", "raw" };
+const wchar_t* const kTexFormatNames[] = { L"PNG", L"JPEG", L"BMP", L"TGA", L"DDS (DirectX)",
+                                           L"Real Racing 3 game texture (.dds.z)",
+                                           L"Original file, as the game stores it" };
+const char* const kAudioFormats[] = { "wav", "ogg", "mp3", "aac", "flac", "raw" };
+const wchar_t* const kAudioFormatNames[] = { L"WAV (PCM 16-bit)", L"Ogg Vorbis (.ogg)", L"MP3 (needs ffmpeg)",
+                                             L"AAC (.m4a, needs ffmpeg)", L"FLAC (needs ffmpeg)",
+                                             L"Original file, as the game stores it" };
+const int kJpgQualities[] = { 100, 95, 92, 90, 85, 80, 75, 70, 60, 50 };
+const int kKbps[] = { 96, 128, 160, 192, 256, 320 };
+} // namespace
+
+struct ExportDlg {
+    ToolTheme theme;
+    bool done = false, ok = false;
+    unsigned kinds = 0;
+    bool rr3 = false, nlCar = false;
+    HWND stored = nullptr;               // "write everything as stored"
+    HWND mFmt = nullptr, mUnit = nullptr, mLods = nullptr, mHelpers = nullptr, mTex = nullptr,
+         mKits = nullptr, mPaint = nullptr;
+    HWND tFmt = nullptr, tPng = nullptr, tJpg = nullptr, tDds = nullptr, tMips = nullptr, tGpu = nullptr;
+    HWND aFmt = nullptr, aOgg = nullptr, aKbps = nullptr, aNote = nullptr;
+    HWND exportBtn = nullptr, cancelBtn = nullptr;
+    std::vector<HWND> modelCtl, texCtl, audioCtl;
+};
+static ExportDlg* g_exportDlg = nullptr;
+
+static int comboSel(HWND c) { return c ? (int)SendMessageW(c, CB_GETCURSEL, 0, 0) : -1; }
+
+static void exportDlgEnable(ExportDlg& d) {
+    bool asStored = d.stored && SendMessageW(d.stored, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    for (HWND h : d.modelCtl) EnableWindow(h, !asStored);
+    for (HWND h : d.texCtl) EnableWindow(h, !asStored);
+    for (HWND h : d.audioCtl) EnableWindow(h, !asStored);
+    if (asStored) return;
+    int mf = comboSel(d.mFmt);
+    bool modelRaw = mf == 3;
+    for (HWND h : { d.mUnit, d.mLods, d.mHelpers, d.mTex, d.mKits, d.mPaint }) if (h) EnableWindow(h, !modelRaw);
+    if (d.mUnit) EnableWindow(d.mUnit, !modelRaw && mf != 2);          // glTF is metres by definition
+    std::string tf = comboSel(d.tFmt) >= 0 ? kTexFormats[comboSel(d.tFmt)] : "png";
+    if (d.tPng) EnableWindow(d.tPng, tf == "png");
+    if (d.tJpg) EnableWindow(d.tJpg, tf == "jpg");
+    if (d.tDds) EnableWindow(d.tDds, tf == "dds");
+    if (d.tMips) EnableWindow(d.tMips, tf == "dds");
+    if (d.tGpu) EnableWindow(d.tGpu, tf == "rr3");
+    std::string af = comboSel(d.aFmt) >= 0 ? kAudioFormats[comboSel(d.aFmt)] : "wav";
+    if (d.aOgg) EnableWindow(d.aOgg, af == "ogg");
+    if (d.aKbps) EnableWindow(d.aKbps, af == "mp3" || af == "aac");
+    if (d.aNote) {
+        bool needs = af == "mp3" || af == "aac" || af == "flac";
+        std::string where;
+        std::wstring note = !needs ? L"" : haveFfmpeg(&where) ? L"ffmpeg: " + widen(where)
+                                                               : L"ffmpeg.exe not found - you will be asked for it";
+        SetWindowTextW(d.aNote, note.c_str());
+    }
+}
+
+static LRESULT CALLBACK ExportDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    ExportDlg* d = g_exportDlg;
+    if (d) {
+        LRESULT r;
+        if (ttMessage(d->theme, hwnd, msg, wp, lp, r)) return r;
+    }
+    switch (msg) {
+    case WM_COMMAND:
+        if (!d) break;
+        if ((HWND)lp == d->exportBtn) { d->ok = true; d->done = true; return 0; }
+        if ((HWND)lp == d->cancelBtn) { d->done = true; return 0; }
+        if (HIWORD(wp) == CBN_SELCHANGE || HIWORD(wp) == BN_CLICKED) exportDlgEnable(*d);
+        return 0;
+    case WM_CLOSE:
+        if (d) d->done = true;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// true when the user pressed Export; g_exportSettings then holds the choices
+// and `asStored` says whether everything goes out as the game stores it
+static bool exportSettingsDialog(HWND owner, unsigned kinds, bool rr3, bool nlCar, const std::wstring& what,
+                                 bool* asStored) {
+    loadExportSettings();
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = ExportDlgProc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"MonkeyToolExport";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    if (!kinds) kinds = 7;
+    ExportDlg d;
+    d.kinds = kinds;
+    d.rr3 = rr3;
+    d.nlCar = nlCar;
+    nfsnl::ExportSettings& s = g_exportSettings;
+
+    const int cw = 620, labelW = 190, x0 = 16, fx = x0 + labelW, fw = cw - fx - 16, rowH = 30;
+    int y = 12;
+    // the rows are laid out first to know the height; the window is made
+    // with that height, then they are created in it
+    struct Row { int kind; const wchar_t* label; char type; HWND* out; std::vector<std::wstring> items; int sel; };
+    std::vector<Row> rows;
+    auto header = [&](const wchar_t* t) { rows.push_back({ 0, t, 'h', nullptr, {}, 0 }); };
+    auto combo = [&](int k, const wchar_t* label, HWND* out, std::vector<std::wstring> items, int sel) {
+        rows.push_back({ k, label, 'c', out, std::move(items), sel });
+    };
+    auto check = [&](int k, const wchar_t* label, HWND* out, bool on) { rows.push_back({ k, label, 'k', out, {}, on }); };
+    auto indexOf = [](const char* const* list, size_t n, const std::string& v) {
+        for (size_t i = 0; i < n; ++i) if (v == list[i]) return (int)i;
+        return 0;
+    };
+    rows.push_back({ 0, L"Write every file exactly as the game stores it (extract, nothing converted)", 'k',
+                     &d.stored, {}, 0 });
+    if (kinds & 1) {
+        header(L"Models");
+        std::vector<std::wstring> f(std::begin(kModelFormatNames), std::end(kModelFormatNames));
+        combo(1, L"Format", &d.mFmt, f, indexOf(kModelFormats, 4, s.modelFormat));
+        std::vector<std::wstring> u;
+        for (const std::string& n : nfsnl::exportUnitNames()) u.push_back(widen(n));
+        combo(1, L"Scale", &d.mUnit, u, std::max(0, std::min((int)u.size() - 1, s.unit)));
+        combo(1, L"Detail levels", &d.mLods, { L"Every LOD, each in its own group",
+                                               L"Most detailed only (single LOD)" }, s.lods ? 1 : 0);
+        check(1, L"Helpers: collision hulls and the decal shell (HELPERS group)", &d.mHelpers, s.helpers);
+        check(1, L"Textures: written beside the model as PNG and linked (.glb: inside)", &d.mTex, s.modelTextures);
+        if (nlCar) {
+            check(1, L"Every body kit (otherwise the kit the viewer shows)", &d.mKits, s.kitAll);
+            check(1, L"Body, rims and calipers in the setup's colours, as in the game", &d.mPaint, s.paint);
+        }
+    }
+    if (kinds & 2) {
+        header(L"Textures");
+        std::vector<std::wstring> f(std::begin(kTexFormatNames), std::end(kTexFormatNames));
+        std::vector<int> map;                       // combo row -> kTexFormats index
+        for (int i = 0; i < 7; ++i) map.push_back(i);
+        if (!rr3) { f.erase(f.begin() + 5); map.erase(map.begin() + 5); }
+        int sel = 0;
+        int want = indexOf(kTexFormats, 7, s.textureFormat);
+        for (size_t i = 0; i < map.size(); ++i) if (map[i] == want) sel = (int)i;
+        combo(2, L"Format", &d.tFmt, f, sel);
+        std::vector<std::wstring> lv;
+        for (int i = 0; i <= 9; ++i)
+            lv.push_back(std::to_wstring(i) + (i == 0 ? L" - no compression (largest, fastest)"
+                                               : i == 6 ? L" - default" : i == 9 ? L" - smallest (slowest)" : L""));
+        combo(2, L"PNG compression (zlib level)", &d.tPng, lv, std::max(0, std::min(9, s.pngLevel)));
+        std::vector<std::wstring> q;
+        int qs = 2;
+        for (int i = 0; i < 10; ++i) { q.push_back(std::to_wstring(kJpgQualities[i])); if (kJpgQualities[i] == s.jpgQuality) qs = i; }
+        combo(2, L"JPEG quality", &d.tJpg, q, qs);
+        std::vector<std::wstring> dd;
+        for (const std::string& n : nfsnl::ddsFormatNames()) dd.push_back(widen(n));
+        combo(2, L"DDS compression", &d.tDds, dd, std::max(0, std::min(4, s.ddsFormat)));
+        check(2, L"DDS mipmaps", &d.tMips, s.mipmaps);
+        if (rr3) {
+            std::vector<std::wstring> g;
+            for (const std::string& n : nfsnl::rr3GpuNames()) g.push_back(widen(n));
+            combo(2, L"Real Racing 3 GPU", &d.tGpu, g, std::max(0, std::min(2, s.rr3Gpu)));
+        }
+    }
+    if (kinds & 4) {
+        header(L"Sounds");
+        std::vector<std::wstring> f(std::begin(kAudioFormatNames), std::end(kAudioFormatNames));
+        combo(4, L"Format", &d.aFmt, f, indexOf(kAudioFormats, 6, s.audioFormat));
+        std::vector<std::wstring> oq;
+        for (int i = -1; i <= 10; ++i)
+            oq.push_back(std::to_wstring(i) + (i == 6 ? L" - default (~192 kbps)" : i == 10 ? L" - best" : L""));
+        combo(4, L"Ogg Vorbis quality", &d.aOgg, oq, std::max(0, std::min(11, s.oggQuality + 1)));
+        std::vector<std::wstring> kb;
+        int ks = 3;
+        for (int i = 0; i < 6; ++i) { kb.push_back(std::to_wstring(kKbps[i]) + L" kbps"); if (kKbps[i] == s.mp3Kbps) ks = i; }
+        combo(4, L"MP3 / AAC bitrate", &d.aKbps, kb, ks);
+        rows.push_back({ 4, L"", 'n', &d.aNote, {}, 0 });
+    }
+    int contentH = 34;                                // the "what" line
+    for (const Row& r : rows) contentH += r.type == 'h' ? 34 : r.type == 'n' ? 22 : rowH;
+    int ch = 12 + contentH + 16 + 32 + 16;
+    RECT wr = { 0, 0, cw, ch };
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_DLGMODALFRAME;
+    AdjustWindowRectEx(&wr, style, FALSE, ex);
+    int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
+    RECT pr;
+    if (owner) GetWindowRect(owner, &pr); else SystemParametersInfoW(SPI_GETWORKAREA, 0, &pr, 0);
+    HWND hwnd = CreateWindowExW(ex, L"MonkeyToolExport", L"Export settings", style,
+                                pr.left + ((pr.right - pr.left) - ww) / 2, pr.top + ((pr.bottom - pr.top) - wh) / 4,
+                                ww, wh, owner, nullptr, g_inst, nullptr);
+    if (!hwnd) return false;
+    g_exportDlg = &d;
+    HFONT font = g_treeFont ? g_treeFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    auto make = [&](const wchar_t* cls, const wchar_t* text, DWORD st, int x, int yy, int w, int h) {
+        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | st, x, yy, w, h, hwnd, nullptr, g_inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)font, TRUE);
+        return c;
+    };
+    HWND whatLbl = make(L"STATIC", what.c_str(), SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS, x0, y, cw - 2 * x0, 22);
+    SendMessageW(whatLbl, WM_SETFONT, (WPARAM)(g_headerFont ? g_headerFont : font), TRUE);
+    d.theme.ctl.push_back({ whatLbl, 's' });
+    y += 34;
+    for (Row& r : rows) {
+        std::vector<HWND>* group = r.kind == 1 ? &d.modelCtl : r.kind == 2 ? &d.texCtl : r.kind == 4 ? &d.audioCtl : nullptr;
+        if (r.type == 'h') {
+            HWND h = make(L"STATIC", r.label, SS_LEFTNOWORDWRAP, x0, y + 8, cw - 2 * x0, 22);
+            SendMessageW(h, WM_SETFONT, (WPARAM)(g_headerFont ? g_headerFont : font), TRUE);
+            d.theme.ctl.push_back({ h, 's' });
+            y += 34;
+            continue;
+        }
+        if (r.type == 'n') {
+            HWND h = make(L"STATIC", L"", SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS, fx, y, fw, 18);
+            *r.out = h;
+            d.theme.ctl.push_back({ h, 's' });
+            y += 22;
+            continue;
+        }
+        if (r.type == 'k') {
+            int x = r.kind ? fx : x0, w = r.kind ? fw : cw - 2 * x0;
+            HWND h = make(L"BUTTON", r.label, BS_AUTOCHECKBOX | WS_TABSTOP, x, y + 3, w, 22);
+            SendMessageW(h, BM_SETCHECK, r.sel ? BST_CHECKED : BST_UNCHECKED, 0);
+            *r.out = h;
+            d.theme.ctl.push_back({ h, 'r' });
+            if (group) group->push_back(h);
+            y += rowH;
+            continue;
+        }
+        HWND l = make(L"STATIC", r.label, SS_LEFTNOWORDWRAP, x0 + 12, y + 5, labelW - 16, 20);
+        d.theme.ctl.push_back({ l, 's' });
+        HWND c = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, fx, y, fw, 300);
+        for (const std::wstring& it : r.items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)it.c_str());
+        SendMessageW(c, CB_SETCURSEL, r.sel, 0);
+        *r.out = c;
+        d.theme.ctl.push_back({ c, 'c' });
+        if (group) { group->push_back(l); group->push_back(c); }
+        y += rowH;
+    }
+    y += 16;
+    d.cancelBtn = make(L"BUTTON", L"Cancel", BS_OWNERDRAW | WS_TABSTOP, cw - 16 - 2 * 110 - 8, y, 110, 32);
+    d.exportBtn = make(L"BUTTON", L"Export", BS_OWNERDRAW | WS_TABSTOP, cw - 16 - 110, y, 110, 32);
+    SendMessageW(d.cancelBtn, WM_SETFONT, (WPARAM)(g_headerFont ? g_headerFont : font), TRUE);
+    SendMessageW(d.exportBtn, WM_SETFONT, (WPARAM)(g_headerFont ? g_headerFont : font), TRUE);
+    d.theme.active.insert(d.exportBtn);
+    ttApply(hwnd, d.theme);
+    exportDlgEnable(d);
+
+    if (owner) EnableWindow(owner, FALSE);
+    ShowWindow(hwnd, SW_SHOW);
+    SetFocus(d.exportBtn);
+    MSG m;
+    while (!d.done && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN && (m.hwnd == hwnd || IsChild(hwnd, m.hwnd))) {
+            bool dropped = false;
+            HWND f = GetFocus();
+            if (f) { wchar_t cls[32] = L""; GetClassNameW(f, cls, 32);
+                     if (!wcscmp(cls, L"ComboBox")) dropped = SendMessageW(f, CB_GETDROPPEDSTATE, 0, 0) != 0; }
+            if (m.wParam == VK_ESCAPE && !dropped) { d.done = true; break; }
+            if (m.wParam == VK_RETURN && !dropped) { d.ok = true; d.done = true; break; }
+        }
+        if (IsDialogMessageW(hwnd, &m)) continue;
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    if (d.ok) {
+        auto checked = [](HWND h, bool def) { return h ? SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED : def; };
+        if (asStored) *asStored = checked(d.stored, false);
+        if (d.mFmt) s.modelFormat = kModelFormats[std::max(0, comboSel(d.mFmt))];
+        if (d.mUnit) s.unit = std::max(0, comboSel(d.mUnit));
+        if (d.mLods) s.lods = std::max(0, comboSel(d.mLods));
+        s.helpers = checked(d.mHelpers, s.helpers);
+        s.modelTextures = checked(d.mTex, s.modelTextures);
+        s.kitAll = checked(d.mKits, s.kitAll);
+        s.paint = checked(d.mPaint, s.paint);
+        if (d.tFmt) {
+            int i = std::max(0, comboSel(d.tFmt));
+            if (!rr3 && i >= 5) ++i;                  // the hidden Real Racing 3 row
+            s.textureFormat = kTexFormats[std::min(6, i)];
+        }
+        if (d.tPng) s.pngLevel = std::max(0, comboSel(d.tPng));
+        if (d.tJpg) s.jpgQuality = kJpgQualities[std::max(0, comboSel(d.tJpg))];
+        if (d.tDds) s.ddsFormat = std::max(0, comboSel(d.tDds));
+        s.mipmaps = checked(d.tMips, s.mipmaps);
+        if (d.tGpu) s.rr3Gpu = std::max(0, comboSel(d.tGpu));
+        if (d.aFmt) s.audioFormat = kAudioFormats[std::max(0, comboSel(d.aFmt))];
+        if (d.aOgg) s.oggQuality = std::max(0, comboSel(d.aOgg)) - 1;
+        if (d.aKbps) s.mp3Kbps = kKbps[std::max(0, comboSel(d.aKbps))];
+        saveExportSettings();
+    }
+    g_exportDlg = nullptr;
+    if (owner) { EnableWindow(owner, TRUE); SetActiveWindow(owner); }
+    DestroyWindow(hwnd);
+    // MP3 / AAC / FLAC with no ffmpeg: ask once, now, rather than per file
+    if (d.ok && (kinds & 4) && (s.audioFormat == "mp3" || s.audioFormat == "aac" || s.audioFormat == "flac") &&
+        !(asStored && *asStored) && !haveFfmpeg(nullptr))
+        askForFfmpeg(owner);
+    return d.ok;
+}
+
 // ---- the car creator (Real Racing 3), in four steps: the car, its
 // performance, its look (models, textures) and its liveries and sound. It
 // adds a new car with its own id, or changes one of the game's cars ----
@@ -8692,6 +9236,9 @@ static CcFigure g_ccFig[] = {
     { "weight_lb", L"Weight (lb)", nullptr }, { "top_speed", L"Top speed (mph)", nullptr },
     { "accel", L"0-60 mph (s)", nullptr }, { "pr", L"Performance rating (PR)", nullptr },
     { "price", L"Price (R$)", nullptr }, { "price_gold", L"Price (gold)", nullptr },
+    // the transmission
+    { "gear_ratios", L"Gear ratios (1st..top)", nullptr }, { "final_drive", L"Final drive ratio", nullptr },
+    { "shift_up", L"Shift up at (rpm)", nullptr }, { "redline", L"Redline (rpm)", nullptr },
 };
 static const char* kCcClasses[] = { "Prod", "Supercar", "Race" };
 static const char* kCcDrives[] = { "RWD", "FWD", "AWD", "RLY" };
@@ -10213,7 +10760,7 @@ static LRESULT CALLBACK TrackAdderProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 // car - and move it; Save writes just the positions moved back into the
 // file, every other byte as it was. ----
 static HWND g_peWnd = nullptr, g_peList = nullptr, g_peX = nullptr, g_peY = nullptr, g_peZ = nullptr,
-            g_peStep = nullptr, g_peTwin = nullptr, g_peInfo = nullptr;
+            g_peStep = nullptr, g_peTwin = nullptr, g_peInfo = nullptr, g_peAngle = nullptr, g_peTurnInfo = nullptr;
 static ToolTheme g_peTheme;
 static nfsnl::Model g_peRaw, g_peShown, g_peWheels;
 static std::vector<nfsnl::Hardpoint> g_pePts, g_peSaved;
@@ -10226,8 +10773,10 @@ static POINT g_peFrom;
 static int g_peSel = -1;
 static RECT g_peViewRect = { 0, 0, 0, 0 };
 enum { IDC_PE_LIST = 5301, IDC_PE_APPLY, IDC_PE_XM, IDC_PE_XP, IDC_PE_YM, IDC_PE_YP, IDC_PE_ZM, IDC_PE_ZP,
-       IDC_PE_STEP, IDC_PE_TWIN, IDC_PE_SAVE, IDC_PE_REVERT, IDC_PE_CLOSE };
+       IDC_PE_STEP, IDC_PE_TWIN, IDC_PE_SAVE, IDC_PE_REVERT, IDC_PE_CLOSE,
+       IDC_PE_RXM, IDC_PE_RXP, IDC_PE_RYM, IDC_PE_RYP, IDC_PE_RZM, IDC_PE_RZP, IDC_PE_ANGLE };
 static const float kPeSteps[] = { 0.001f, 0.005f, 0.01f, 0.05f, 0.1f };
+static const float kPeAngles[] = { 1.0f, 5.0f, 15.0f, 45.0f, 90.0f };
 
 static COLORREF peColour(const std::string& n) {
     if (n.find("LIGHT") != std::string::npos) return RGB(0xF2, 0xC8, 0x30);       // head / brake lights
@@ -10272,9 +10821,66 @@ static void peRefreshModel() {
     InvalidateRect(g_peWnd, &g_peViewRect, FALSE);
 }
 static bool peChanged() {
-    for (size_t k = 0; k < g_pePts.size(); ++k)
+    for (size_t k = 0; k < g_pePts.size(); ++k) {
         for (int c = 0; c < 3; ++c) if (g_pePts[k].pos[c] != g_peSaved[k].pos[c]) return true;
+        for (int c = 0; c < 9; ++c) if (g_pePts[k].basis[c] != g_peSaved[k].basis[c]) return true;
+    }
     return false;
+}
+// the selected hinge's turn, as angles about the car's axes (for the panel)
+static void peShowTurn() {
+    if (!g_peTurnInfo) return;
+    if (g_peSel < 0) { SetWindowTextW(g_peTurnInfo, L""); return; }
+    const nfsnl::Hardpoint& h = g_pePts[g_peSel];
+    if (!h.hinge) {
+        SetWindowTextW(g_peTurnInfo, L"A position only: the game reads no turn for this point (HINGE_ points turn).");
+        return;
+    }
+    // rows: forward, left, up; the turn against the neutral frame as yaw / pitch / roll
+    const float* b = h.basis;
+    float yaw = std::atan2(-b[0], -b[2]) * 57.29578f;            // forward is -z at rest
+    float pitch = std::asin(std::max(-1.0f, std::min(1.0f, b[1]))) * 57.29578f;
+    float roll = std::atan2(b[3 + 1], b[6 + 1]) * 57.29578f;       // the left row's lift against up
+    wchar_t t[160];
+    swprintf(t, 160, L"Turn: yaw %.1f\u00B0, pitch %.1f\u00B0, roll %.1f\u00B0", yaw, pitch, roll);
+    SetWindowTextW(g_peTurnInfo, t);
+}
+// turn the selected hinge about one of the car's axes (and its twin, mirrored)
+static void peRotate(int axis, float sign) {
+    if (g_peSel < 0) return;
+    if (!g_pePts[g_peSel].hinge) {
+        MessageBoxW(g_peWnd, L"Only HINGE_ points have a turn in the .points file - the game reads a position alone "
+                             L"for the others (lights, exhausts, wheels).", L"Car points", MB_ICONINFORMATION);
+        return;
+    }
+    int s = (int)SendMessageW(g_peAngle, CB_GETCURSEL, 0, 0);
+    float a = sign * kPeAngles[s >= 0 && s < 5 ? s : 1] * 0.01745329f;
+    float c = std::cos(a), sn = std::sin(a);
+    float R[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    int i = (axis + 1) % 3, j = (axis + 2) % 3;
+    R[i * 3 + i] = c;  R[i * 3 + j] = -sn;
+    R[j * 3 + i] = sn; R[j * 3 + j] = c;
+    auto apply = [](nfsnl::Hardpoint& h, const float M[9]) {
+        float out[9];
+        for (int r = 0; r < 3; ++r)                // each row is a direction: turned by M
+            for (int k = 0; k < 3; ++k)
+                out[r * 3 + k] = M[k * 3 + 0] * h.basis[r * 3 + 0] + M[k * 3 + 1] * h.basis[r * 3 + 1] +
+                                 M[k * 3 + 2] * h.basis[r * 3 + 2];
+        memcpy(h.basis, out, sizeof(out));
+    };
+    apply(g_pePts[g_peSel], R);
+    if (SendMessageW(g_peTwin, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        int t = peTwin(g_peSel);
+        if (t >= 0 && g_pePts[t].hinge) {
+            // mirrored across the car's middle: M R M with M = diag(-1, 1, 1)
+            float Rm[9];
+            memcpy(Rm, R, sizeof(Rm));
+            for (int k = 0; k < 3; ++k) { Rm[0 * 3 + k] *= -1; Rm[k * 3 + 0] *= -1; }
+            apply(g_pePts[t], Rm);
+        }
+    }
+    peShowTurn();
+    peRefreshModel();
 }
 static void peSelect(int i, bool fromList) {
     g_peSel = i;
@@ -10286,6 +10892,7 @@ static void peSelect(int i, bool fromList) {
         SendMessageW(g_peList, 0x1013 /* LVM_ENSUREVISIBLE */, (WPARAM)i, FALSE);
     }
     peShowSel();
+    peShowTurn();
     InvalidateRect(g_peWnd, &g_peViewRect, FALSE);
 }
 // move the selected point (and its twin, mirrored, when asked)
@@ -10319,10 +10926,12 @@ static bool peSave(HWND hwnd) {
     Bytes f = g_peFile;
     int moved = 0;
     for (size_t k = 0; k < g_pePts.size(); ++k) {
-        bool same = true;
+        bool same = true, sameTurn = true;
         for (int c = 0; c < 3; ++c) if (g_pePts[k].pos[c] != g_peSaved[k].pos[c]) same = false;
-        if (same) continue;
-        if (!nfsnl::rr3PointsSetPosition(f, g_pePts[k].name, g_pePts[k].pos)) {
+        for (int c = 0; c < 9; ++c) if (g_pePts[k].basis[c] != g_peSaved[k].basis[c]) sameTurn = false;
+        if (same && sameTurn) continue;
+        if ((!same && !nfsnl::rr3PointsSetPosition(f, g_pePts[k].name, g_pePts[k].pos)) ||
+            (!sameTurn && !nfsnl::rr3PointsSetBasis(f, g_pePts[k].name, g_pePts[k].basis))) {
             MessageBoxW(hwnd, (L"The point " + widen(g_pePts[k].name) + L" could not be written.").c_str(), L"Car points", MB_ICONWARNING);
             return false;
         }
@@ -10520,6 +11129,12 @@ static LRESULT CALLBACK PointsEditorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         case IDC_PE_YP: peNudge(1, 1); return 0;
         case IDC_PE_ZM: peNudge(2, -1); return 0;
         case IDC_PE_ZP: peNudge(2, 1); return 0;
+        case IDC_PE_RXM: peRotate(0, -1); return 0;
+        case IDC_PE_RXP: peRotate(0, 1); return 0;
+        case IDC_PE_RYM: peRotate(1, -1); return 0;
+        case IDC_PE_RYP: peRotate(1, 1); return 0;
+        case IDC_PE_RZM: peRotate(2, -1); return 0;
+        case IDC_PE_RZP: peRotate(2, 1); return 0;
         case IDC_PE_SAVE: peSave(hwnd); return 0;
         case IDC_PE_REVERT:
             g_pePts = g_peSaved;
@@ -10646,9 +11261,23 @@ static void openPointsEditor(HWND owner, const Bytes& model, const Bytes& points
                                     x + 168, y + 2, 240, 22, g_peWnd, (HMENU)(INT_PTR)IDC_PE_TWIN, g_inst, nullptr));
     SendMessageW(g_peTwin, BM_SETCHECK, BST_CHECKED, 0);
     y += 36;
+    // the turn of a hinge (steering wheel, mirrors, dials, doors)
+    button(L"Rx -", IDC_PE_RXM, x, y, 62); button(L"Rx +", IDC_PE_RXP, x + 66, y, 62);
+    button(L"Ry -", IDC_PE_RYM, x + 140, y, 62); button(L"Ry +", IDC_PE_RYP, x + 206, y, 62);
+    button(L"Rz -", IDC_PE_RZM, x + 280, y, 62); button(L"Rz +", IDC_PE_RZP, x + 346, y, 62);
+    y += 36;
+    label(L"Turn:", x, y + 4, 40);
+    kind = 'c';
+    g_peAngle = font(CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                     x + 44, y, 110, 200, g_peWnd, (HMENU)(INT_PTR)IDC_PE_ANGLE, g_inst, nullptr));
+    for (const wchar_t* t : { L"1\u00B0", L"5\u00B0", L"15\u00B0", L"45\u00B0", L"90\u00B0" })
+        SendMessageW(g_peAngle, CB_ADDSTRING, 0, (LPARAM)t);
+    SendMessageW(g_peAngle, CB_SETCURSEL, 1, 0);
+    g_peTurnInfo = label(L"", x + 168, y + 4, pw - 168, 20);
+    y += 32;
     g_peInfo = label(L"Drag on the car to turn it, wheel to zoom. Click a point to pick it; double-click to look at "
                      L"it from close by. Metres: X across the car (- is the left side), Y up, Z along it (- is the front). "
-                     L"Yellow: lights, orange: exhausts, blue: wheels, green: hinges.", x, y, pw, 92);
+                     L"Yellow: lights, orange: exhausts, blue: wheels, green: hinges - Rx / Ry / Rz turn a hinge.", x, y, pw, 92);
     button(L"Save", IDC_PE_SAVE, x, rc.bottom - 42, 120, 32);
     button(L"Undo all", IDC_PE_REVERT, x + 128, rc.bottom - 42, 120, 32);
     button(L"Close", IDC_PE_CLOSE, x + pw - 100, rc.bottom - 42, 100, 32);

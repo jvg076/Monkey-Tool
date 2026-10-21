@@ -2,6 +2,71 @@
 
 Every release of Monkey Tool, newest first.
 
+## 1.3.1
+
+### New
+* **Export settings window** (like Frosty's "Mesh Export Settings"). "Save as...", "Extract all
+  assets" and "Export all assets from this folder" are one **Export...** now: the window asks
+  once for the whole job, before the file or folder is chosen, and remembers the choices.
+  * Models: FBX, OBJ, glTF 2.0 (.glb) or the original file; scale (game units as before, metres,
+    centimetres, millimetres, inches - the FBX header says which); every LOD or the most detailed
+    only; helpers in or out; textures beside the model; No Limits body kits and setup colours.
+    The questions that popped up one after another (kits, colours, textures) are gone.
+  * Textures: PNG with a zlib level 0-9, JPEG quality, BMP, TGA, DDS as BC1 / BC2 / BC3 / BC7 or
+    uncompressed R8G8B8A8, with or without mipmaps.
+  * **Real Racing 3 game textures for a chosen GPU**: ETC1 `.etc.dds.z` (every Android phone -
+    Mali, Samsung Xclipse, PowerVR and Adreno all read it), ATC `.atc.dds.z` (the Adreno build)
+    or RGBA4444 uncompressed. Same header, mip chain and row order as the game's own files;
+    checked by reading them back. Xclipse phones use the ETC files: Real Racing 3 has no
+    Xclipse-only textures.
+  * Sounds: WAV, **Ogg Vorbis** (built in), MP3 / AAC / FLAC through ffmpeg.exe when you have it.
+  * "Write every file exactly as the game stores it" at the top does what Extract did.
+  * Command line: `export <asset> <outBase> --model ... --unit ... --tex dds --dds bc7 --audio ogg`.
+  * Built in for this: miniz (PNG levels), bc7enc (BC7), libogg + libvorbis (Ogg). See
+    THIRD_PARTY_NOTICES.md.
+* **Points editor: turning.** Rx / Ry / Rz turn a HINGE_ point (steering wheel, mirrors, dials)
+  by 1, 5, 15, 45 or 90 degrees, the twin on the other side mirrored; its yaw / pitch / roll
+  are shown, and Save writes the turn into the .points file (a file saved unchanged comes out
+  byte for byte the same). Plain points (lights, exhausts, wheels) have no turn in the file -
+  the game reads a position only - and the editor says so.
+* **Car creator: the transmission** on the first page of figures: gear ratios (first to top -
+  the number of gears follows), final drive, shift-up rpm, redline.
+* **Save Editor: Premium / VIP player.** A tick beside the player's name switches every yes/no
+  flag in the save whose name says VIP, premium or subscriber, in Real Racing 3 and No Limits.
+  It is greyed out, and says so, when a save holds no such flag.
+* **`_shared.m3g` shows every LOD.** On its own it used to show only the finest wheel; every
+  level the file has is in the LOD list now. On a car, the wheel's level follows the car file's
+  (`_d.m3g` gets the `LOD_D` wheel when there is one).
+
+### Changed
+* **The icons moved to the top left**, over the search box and the tree, so the preview has the
+  whole height on the right.
+* Right-click on the tree: **Export...** (one asset), **Export this folder**, **Export the
+  selected assets**; "Show the file this asset is in" stays.
+
+### Fixed
+* **No Limits: the ghost car (Pininfarina Battista Anniversario).** A car built from Real
+  Racing-named parts (LOD_B_BODY, LOD_B_DOOR ...) had them put one detail level down by their
+  letter, though the file hangs them under its lod_00: LOD00 was a see-through shell. The file's
+  own level now wins. Real Racing Next cars read as before.
+* **No Limits: green parts (BMW M3 G80 and others).** The setup's body colour went on every
+  `paint_*` material, gloss-black grilles, skirts, window frames and mirror bases included. Only
+  the body paint takes it now.
+* **No Limits: wrong body UVs / scratches on the paint (BMW M3 GTR E46).** The paint shader's
+  material names a work map as its texture (`texture_car_scratch_mask`, `texture_uv_test_01`,
+  a wrap). Drawn as the body's colour it put white scratches and test patterns on the car. The
+  body is its paint colour now. Wraps and liveries on the second UV set are not drawn yet.
+* **Real Racing 3: "Engine sound from" another car.** The data's sample paths carry a car id
+  (`audio/Vehicles/v8_02/id_109_accel`). Copying the paths alone left the car playing its own
+  samples. The other car's sample files are now copied under the car's own id
+  (`id_<car>_accel ...`) and the data points at the copies. A new car gets its donor's samples
+  under its new id the same way. The game's audio folder has to be among the files opened; the
+  report says when it is not.
+
+### Not changed yet
+* **Steering wheel position against the game**: needs the in-game screenshots to compare (the
+  game view and the tool's, same car).
+
 ## 1.3.0
 
 ### Changed

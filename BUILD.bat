@@ -1,9 +1,9 @@
 @echo off
-title Monkey Tool 1.3.0 - build
+title Monkey Tool 1.3.1 - build
 cd /d "%~dp0"
 
 echo.
-echo   Monkey Tool 1.3.0
+echo   Monkey Tool 1.3.1
 echo   ================
 echo.
 echo   Building. If no compiler is installed, a portable one is

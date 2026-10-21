@@ -507,6 +507,9 @@ struct Model {
     // default, since most programs open hidden parts as if they were not
     // there), "stock" or a kit letter (keepKit drops the other kits' parts)
     std::string exportKit = "all";
+    // what the FBX header states one unit is, in centimetres (FBX's own
+    // UnitScaleFactor): 1 = centimetres, 100 = metres
+    double fbxUnitScale = 1.0;
     bool valid = false;
 };
 
@@ -606,6 +609,9 @@ std::vector<Hardpoint> rr3ReadPoints(const uint8_t* data, size_t len);
 // space, as rr3ReadPoints gives it), in place: every other byte stays as it
 // was. A spline's node is named as rr3ReadPoints names it (SPLINE_X.03).
 bool rr3PointsSetPosition(Bytes& file, const std::string& name, const float pos[3]);
+// a hinge's turn (its 3x3 basis, rows in the model's axes) written back;
+// false for a point that is not a hinge - the game reads no turn for those
+bool rr3PointsSetBasis(Bytes& file, const std::string& name, const float basis[9]);
 
 // ---- .nct, a car's data file ----
 // One fixed pad XORed over the whole file, the same pad for every car. The
@@ -669,6 +675,14 @@ std::vector<Rr3CarField> rr3CarFields(const Rr3Car& car);
 bool rr3CarSet(Rr3Car& car, const std::string& key, const std::string& value, std::string& why);
 // the engine sound (samples, idle, levels) of another car
 bool rr3CarCopySound(Rr3Car& car, const Rr3Car& from, std::string& why);
+// The engine's sample files (audio/Vehicles/<set>/id_<id>_accel ...) the
+// car's data names, copied under the car's own id (id_<ownId>_...) and the
+// data pointed at the copies: a car whose sound came from another car, or a
+// new car, then plays it whether the game goes by the path or by the car's
+// id. `files` gets (asset path, bytes); the return says how many.
+int rr3CarOwnSoundFiles(Rr3Car& car, uint32_t ownId, const std::vector<std::string>& assets,
+                        const std::function<bool(const std::string&, Bytes&)>& readAsset,
+                        std::vector<std::pair<std::string, Bytes>>& files, std::string& report);
 Bytes rr3CarPlain(const Rr3Car& car);
 // Encoded back. Bytes that did not change keep the original's encoding; false
 // when a changed byte falls where the pad is not certain (`report` says so).
@@ -1449,5 +1463,59 @@ bool convertAsset(const std::string& assetPath, const uint8_t* data, size_t len,
                   const std::string& format, Bytes& out, std::string* error,
                   std::string* usedExtension = nullptr,
                   const uint8_t* sidecar = nullptr, size_t sidecarLen = 0);
+
+// ---- export settings (nfsnl_export.cpp): what the Export window asks once
+// for a whole job - formats, scale, compression - instead of a question per
+// file ----
+struct ExportSettings {
+    // models
+    std::string modelFormat = "fbx";   // raw, fbx, obj, glb
+    int unit = 0;                      // see exportUnitNames()
+    int lods = 0;                      // 0 every level, 1 the most detailed only
+    bool helpers = true;               // collision hulls, decal shell (their own group)
+    bool modelTextures = true;         // the textures beside the model (glb: inside)
+    bool kitAll = false;               // No Limits: every body kit, not the one shown
+    bool paint = true;                 // No Limits: the setup's colours on body, rims, calipers
+    // textures
+    std::string textureFormat = "png"; // raw, png, jpg, bmp, tga, dds, rr3
+    int pngLevel = 6;                  // 0 (none) .. 9 (smallest)
+    int jpgQuality = 92;
+    int ddsFormat = 2;                 // see ddsFormatNames()
+    bool mipmaps = true;
+    int rr3Gpu = 0;                    // see rr3GpuNames()
+    // sounds
+    std::string audioFormat = "wav";   // raw, wav, ogg, mp3, aac, flac
+    int oggQuality = 6;                // Vorbis -1 .. 10
+    int mp3Kbps = 192;
+};
+std::vector<std::string> exportUnitNames();
+std::vector<std::string> ddsFormatNames();
+std::vector<std::string> rr3GpuNames();
+// drop levels / helpers and scale the model as the settings say
+void applyModelExportSettings(Model& m, const ExportSettings& s);
+// PNG at a zlib level 0..9 (miniz)
+Bytes encodePngLevel(const Image& img, int level);
+// a DDS file: BC1, BC2, BC3, BC7 or uncompressed RGBA8, optionally with mipmaps
+bool encodeDdsFile(const Image& img, int ddsFormat, bool mipmaps, Bytes& out, std::string* err = nullptr);
+// a Real Racing 3 texture as the game reads it from .depot, wrapped in .z:
+// ETC1 (.etc.dds.z), ATC (.atc.dds.z) or RGBA4444 (.etc.dds.z), full mip
+// chain; `ext` gets the file ending
+bool encodeRr3GameTexture(const Image& img, int gpu, Bytes& out, std::string& ext);
+// one picture in the settings' texture format; `ext` gets the file ending
+bool encodeImageAs(const Image& img, const ExportSettings& s, Bytes& out, std::string& ext,
+                   std::string* err = nullptr);
+// a .wav (PCM 16-bit) to Ogg Vorbis at quality -1 .. 10 (libvorbis)
+bool wavToOgg(const Bytes& wav, int quality, Bytes& out, std::string* err = nullptr);
+// what an asset is for the Export window: 1 model, 2 texture, 4 sound, 0 other
+unsigned exportKindOf(const std::string& path);
+// One asset written as the settings say. Models load, take the settings
+// (levels, helpers, scale) and are written; textures are decoded and encoded
+// in the chosen format; sounds become .wav or .ogg. MP3 / AAC / FLAC come back
+// as a .wav with `ext` "wav" and `needsFfmpeg` set, for the caller to hand on.
+// Anything else falls back to convertAsset's own format for it.
+bool convertAssetWithSettings(const std::string& path, const uint8_t* data, size_t len,
+                              const ExportSettings& s, Bytes& out, std::string& ext,
+                              std::string* err = nullptr, bool* needsFfmpeg = nullptr,
+                              const uint8_t* sidecar = nullptr, size_t sidecarLen = 0);
 
 } // namespace nfsnl

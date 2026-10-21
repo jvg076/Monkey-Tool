@@ -165,7 +165,13 @@ void assignLodLevels(Model& model) {
             else if (n.find("_DAMAGE") != std::string::npos || n.find("BROKEN") != std::string::npos ||
                      n.find("SHATTER") != std::string::npos || n.find("CRACKED") != std::string::npos)
                 mesh.lod = "DAMAGE";
-            else {
+            else if (mesh.lod.compare(0, 3, "LOD") == 0) {
+                // A No Limits car built from Real Racing parts (the Battista
+                // Anniversario): its LOD_B_ body hangs under the lod_00
+                // node. The node tree is what the game draws by; reading the
+                // letter instead put the doors and sides one level down and
+                // left the car a see-through shell.
+            } else {
                 char buf[16];
                 snprintf(buf, sizeof(buf), "LOD%02d", n[4] - 'A');
                 mesh.lod = buf;
@@ -1293,6 +1299,23 @@ Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
                         memcpy(part.color, paint->color, sizeof(part.color));
                     }
                 }
+                // The paint shader draws the car's colour (and its livery);
+                // the "diffuse" its material names is often an artist's work
+                // map - texture_car_scratch_mask, texture_uv_test_01 - that
+                // the game never shows as colour. Drawn as the body's texture
+                // it left the BMW M3 GTR covered in white scratches (the
+                // "wrong UVs") and the M3 G80 a grey test pattern while its
+                // black trim took the paint. The body is its paint colour.
+                if (part.material.rfind("paint", 0) == 0 && !part.texture.empty()) {
+                    std::string leaf = baseName(part.texture);
+                    for (char& c : leaf) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+                    for (const char* k : { "scratch", "uv_test", "uvtest", "checker", "_mask", "_ao.", "_ao_",
+                                           "dirt", "damage", "normal", "wrap" })
+                        if (leaf.find(k) != std::string::npos) {
+                            part.texture.clear();
+                            break;
+                        }
+                }
                 bool carbonPart = part.name.rfind("mesh_carbon_", 0) == 0 ||
                                   part.name.find("_carbon_lod") != std::string::npos;
                 if (carbonPart && mt.name.find("carbon") == std::string::npos &&
@@ -1450,7 +1473,7 @@ void appendNums(std::string& s, const float* v, size_t count, int dec) {
 std::string writeObjString(const Model& m) {
     std::string s;
     s.reserve(1 << 20);
-    s += "# exported by Monkey Tool 1.3.0\n";
+    s += "# exported by Monkey Tool 1.3.1\n";
     size_t baseV = 1;
     for (const Mesh& mesh : m.meshes) {
         // group by LOD so an OBJ viewer shows the same tree the FBX does
@@ -1527,11 +1550,11 @@ std::string writeFbxString(const Model& m) {
     std::string s;
     s.reserve(1 << 22);
     s += "; FBX 7.3.0 project file\n"
-         "; Exported by Monkey Tool 1.3.0\n\n"
+         "; Exported by Monkey Tool 1.3.1\n\n"
          "FBXHeaderExtension:  {\n"
          "    FBXHeaderVersion: 1003\n"
          "    FBXVersion: 7300\n"
-         "    Creator: \"Monkey Tool 1.3.0 by GM25\"\n"
+         "    Creator: \"Monkey Tool 1.3.1 by GM25\"\n"
          "}\n"
          "GlobalSettings:  {\n"
          "    Version: 1000\n"
@@ -1542,7 +1565,14 @@ std::string writeFbxString(const Model& m) {
          "        P: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1\n"
          "        P: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n"
          "        P: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n"
-         "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n"
+         "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",";
+    {
+        char u[32];
+        snprintf(u, sizeof(u), "%g", m.fbxUnitScale > 0 ? m.fbxUnitScale : 1.0);
+        s += u;
+    }
+    s += "\n"
+         "        P: \"OriginalUnitScaleFactor\", \"double\", \"Number\", \"\",1\n"
          "    }\n"
          "}\n\n";
 
@@ -2757,8 +2787,16 @@ int nlApplyCarPaint(Model& m, const NlCarPaint& paint) {
         std::string leaf = lowerOf(baseName(base));
         std::string nm = lowerOf(me.name + " " + me.material);
         int kind = -1, mode = 1;
+        // The body paint is paint_shader*: paint_gloss_black (grilles, skirts,
+        // window frames, mirror bases) is a fixed black the car colour never
+        // touches. Painting every paint_* material turned those green on the
+        // BMW M3 G80.
+        std::string mat = lowerOf(me.material);
+        bool fixedPaint = mat.find("black") != std::string::npos || mat.find("white") != std::string::npos ||
+                          mat.find("chrome") != std::string::npos || mat.find("carbon") != std::string::npos ||
+                          mat.find("matte") != std::string::npos || mat.find("gloss_") != std::string::npos;
         if (leaf.compare(0, 13, "texture_paint") == 0 ||
-            (base.empty() && lowerOf(me.material).compare(0, 5, "paint") == 0)) {
+            (base.empty() && mat.compare(0, 5, "paint") == 0 && !fixedPaint)) {
             kind = NL_BODY;
             mode = 2;
         } else if (leaf.compare(0, 21, "texture_brake_caliper") == 0 && leaf.find("alpha") == std::string::npos) {

@@ -24,6 +24,7 @@
 #include "nfsnl.h"
 
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -371,6 +372,50 @@ bool rr3CarCopySound(Rr3Car& car, const Rr3Car& from, std::string& why) {
     return true;
 }
 
+int rr3CarOwnSoundFiles(Rr3Car& car, uint32_t ownId, const std::vector<std::string>& assets,
+                        const std::function<bool(const std::string&, Bytes&)>& readAsset,
+                        std::vector<std::pair<std::string, Bytes>>& files, std::string& report) {
+    if (!car.ok || car.iDrive < 0 || car.iSteady <= car.iDrive) return 0;
+    auto low = [](std::string t) { for (char& c : t) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); return t; };
+    int copied = 0, missing = 0;
+    std::string own = "id_" + std::to_string(ownId) + "_";
+    for (int i = car.iDrive + 1; i < car.iSteady; ++i) {
+        Rr3Car::Tok& t = car.toks[i];
+        if (!t.str || low(t.s).compare(0, 15, "audio/vehicles/") != 0) continue;
+        size_t at = low(t.s).find("/id_");
+        if (at == std::string::npos) continue;
+        size_t idEnd = t.s.find('_', at + 4);
+        if (idEnd == std::string::npos) continue;
+        std::string theirs = t.s.substr(at + 1, idEnd - at);        // id_109_
+        if (theirs == own) continue;
+        std::string renamed = t.s.substr(0, at + 1) + own + t.s.substr(idEnd + 1);
+        // every file of that name, whatever its ending (.gnsu, .z ...)
+        std::string key = low(t.s);
+        int found = 0;
+        for (const std::string& a : assets) {
+            std::string la = low(a);
+            size_t k = la.find(key);
+            if (k == std::string::npos) continue;
+            size_t after = k + key.size();
+            if (after < la.size() && la[after] != '.') continue;      // id_109_accel, not id_109_accel_2
+            Bytes data;
+            if (!readAsset(a, data)) continue;
+            std::string to = a.substr(0, k) + renamed + a.substr(after);
+            files.push_back({ to, std::move(data) });
+            ++found;
+        }
+        if (found) { t.s = renamed; copied += found; }
+        else ++missing;
+    }
+    if (copied)
+        report += "Sound: " + std::to_string(copied) + " engine sample file(s) copied under " + own +
+                  "..., and the car's data points at them.\n";
+    if (missing)
+        report += "Sound: " + std::to_string(missing) + " engine sample(s) the data names are not among the files "
+                  "opened - open the game's audio folder too, or the car may keep its old sound.\n";
+    return copied;
+}
+
 Bytes rr3CarPlain(const Rr3Car& car) {
     Bytes p;
     p.reserve(car.plain.size() + 64);
@@ -476,6 +521,15 @@ bool rr3CreateCar(const Rr3CarJob& job, const std::vector<std::string>& assets,
                 if (!rr3CarRead(job.soundFrom.data(), job.soundFrom.size(), from) || !rr3CarCopySound(c, from, why)) {
                     say("Data: the engine sound could not be copied: " + (why.empty() ? from.why : why));
                     ok = false;
+                } else {
+                    // the other car's samples, under this car's own id
+                    uint32_t ownId = 0;
+                    if (c.toks.size() > 1 && !c.toks[1].str) memcpy(&ownId, c.toks[1].raw, 4);
+                    std::vector<std::pair<std::string, Bytes>> snd;
+                    std::string r;
+                    rr3CarOwnSoundFiles(c, ownId, assets, readAsset, snd, r);
+                    for (auto& f : snd) out.push_back({ f.first, std::move(f.second), "engine sample" });
+                    if (!r.empty()) report += r;
                 }
             }
             Bytes enc;

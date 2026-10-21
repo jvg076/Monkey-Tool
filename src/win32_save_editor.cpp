@@ -61,7 +61,7 @@ std::string lowerStr(std::string s) {
 }
 
 enum {
-    ID_OPEN = 100, ID_CALIB, ID_FILTER, ID_LIST, ID_APPLY, ID_SAVE, ID_PICTURE, ID_NAME,
+    ID_OPEN = 100, ID_CALIB, ID_FILTER, ID_LIST, ID_APPLY, ID_SAVE, ID_PICTURE, ID_NAME, ID_PREMIUM,
     ID_QUICK0 = 200,
 };
 const int kMaxQuick = 14;
@@ -83,6 +83,7 @@ struct Editor {
     HWND buttons[5] = {};
     HWND btnPicture = nullptr;
     HWND lblName = nullptr, edName = nullptr;
+    HWND chkPremium = nullptr;             // premium / VIP player
     SaveEditorAvatarHook avatarHook;
 
     std::string game;              // "rr3" | "nfs" | ""
@@ -135,6 +136,73 @@ bool fieldEditable(const std::pair<bool, size_t>& f) {
 bool fieldSet(const std::pair<bool, size_t>& f, const std::string& v, std::string& err) {
     if (f.first) return E.rr.root[f.second].setFromString(v, err);
     return E.nfs.set(E.nfs.leaves[f.second], v, err);
+}
+
+void refilter();
+// ---- premium / VIP: the on/off flags the save keeps about the player's
+// account (paying player, VIP, subscription). They are found by name - a
+// yes/no field whose name says vip, premium or subscriber - not by a fixed
+// path, since the games name and move them between versions. VIP points and
+// the like (numbers) are left alone.
+bool premiumName(const std::string& name) {
+    std::string n = lowerStr(name);
+    bool hit = false;
+    for (const char* k : { "vip", "premium", "subscri", "ispayer", "is_payer", "payinguser", "paying_user",
+                           "spender" })
+        if (n.find(k) != std::string::npos) hit = true;
+    if (!hit) return false;
+    for (const char* k : { "point", "vipp", "currency", "wallet", "balance", "count", "level", "xp", "time",
+                           "date", "expir", "reward", "offer", "price", "cost", "sku", "seen", "shown", "popup",
+                           "tutorial", "progress" })
+        if (n.find(k) != std::string::npos) return false;
+    return true;
+}
+bool boolText(const std::string& v, bool& on) {
+    std::string t = lowerStr(trimmed(v));
+    if (t == "true" || t == "1") { on = true; return true; }
+    if (t == "false" || t == "0") { on = false; return true; }
+    return false;
+}
+std::vector<std::pair<bool, size_t>> premiumFields() {
+    std::vector<std::pair<bool, size_t>> out;
+    for (const auto& f : E.all) {
+        bool on;
+        if (fieldEditable(f) && premiumName(fieldName(f)) && boolText(fieldValue(f), on)) out.push_back(f);
+    }
+    return out;
+}
+void fillPremium() {
+    if (!E.chkPremium) return;
+    std::vector<std::pair<bool, size_t>> f = premiumFields();
+    bool any = false;
+    for (const auto& x : f) { bool on; if (boolText(fieldValue(x), on) && on) any = true; }
+    SendMessageW(E.chkPremium, BM_SETCHECK, any ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(E.chkPremium, f.empty() ? FALSE : TRUE);
+    std::string label = f.empty() ? std::string("Premium / VIP player (this save has no such flag)")
+                                  : "Premium / VIP player (" + std::to_string(f.size()) + " flag" +
+                                        (f.size() == 1 ? ": " + fieldName(f[0]) : std::string("s")) + ")";
+    setText(E.chkPremium, label);
+}
+void setPremium(bool on) {
+    std::vector<std::pair<bool, size_t>> f = premiumFields();
+    int changed = 0;
+    std::string errs;
+    for (const auto& x : f) {
+        std::string cur = fieldValue(x);
+        bool was;
+        if (!boolText(cur, was) || was == on) continue;
+        std::string t = lowerStr(trimmed(cur));
+        std::string want = (t == "true" || t == "false") ? (on ? "true" : "false") : (on ? "1" : "0");
+        std::string e;
+        if (fieldSet(x, want, e)) ++changed;
+        else errs += fieldName(x) + ": " + e + "\n";
+    }
+    if (changed) E.dirty = true;
+    refilter();
+    fillPremium();
+    status(changed ? std::string("Premium / VIP ") + (on ? "on" : "off") + " in " + std::to_string(changed) +
+                         " field(s) - click \"Save changes\" to write it."
+                   : errs.empty() ? std::string("Nothing to change.") : "Not changed: " + errs);
 }
 
 // ------------------------------------------------------------------ theme
@@ -222,12 +290,18 @@ void applyControlTheme() {
     for (HWND e : { E.edFolder, E.edFilter, E.edVal })
         if (e) SetWindowTheme(e, E.theme.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
     for (HWND q : E.quickEd) if (q) SetWindowTheme(q, E.theme.dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+    // unthemed in the dark, so WM_CTLCOLORSTATIC colours its text
+    if (E.chkPremium) SetWindowTheme(E.chkPremium, E.theme.dark ? L"" : nullptr, E.theme.dark ? L"" : nullptr);
     darkTitleBar(E.hwnd, E.theme.dark);
 }
 
 // ------------------------------------------------------------------ building
 void setLoaded(bool on) {
     for (HWND h : { E.edFilter, E.list, E.edVal, E.btnApply, E.btnSave, E.btnPicture, E.edName }) EnableWindow(h, on);
+    if (!on && E.chkPremium) {
+        EnableWindow(E.chkPremium, FALSE);
+        SendMessageW(E.chkPremium, BM_SETCHECK, BST_UNCHECKED, 0);
+    }
     if (!on) {
         setText(E.edName, "");
         for (int i = 0; i < kMaxQuick; ++i) {
@@ -250,6 +324,8 @@ void build() {
                        572, 42, 136, 26, ID_PICTURE);
     E.lblName = ctl(0, L"STATIC", L"Player name:", SS_LEFT | SS_CENTERIMAGE, 12, 68, 80, 22, 0);
     E.edName = ctl(WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, 94, 68, 260, 22, ID_NAME);
+    E.chkPremium = ctl(0, L"BUTTON", L"Premium / VIP player", BS_AUTOCHECKBOX | WS_TABSTOP, 366, 68, 340, 22,
+                       ID_PREMIUM);
 
 
     for (int i = 0; i < kMaxQuick; ++i) {
@@ -421,6 +497,7 @@ void openFolder(const std::string& root, bool prompt = true) {
     fillAll();
     fillQuick();
     setLoaded(true);
+    fillPremium();
     char buf[256];
     if (game == "rr3")
         snprintf(buf, sizeof(buf), "Real Racing 3  -  character.2.dat  (%u fields)", (unsigned)E.all.size());
@@ -696,6 +773,8 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             profilePicture();
         } else if (id == ID_APPLY && code == BN_CLICKED) {
             applyAdvanced();
+        } else if (id == ID_PREMIUM && code == BN_CLICKED) {
+            setPremium(SendMessageW(E.chkPremium, BM_GETCHECK, 0, 0) == BST_CHECKED);
         } else if (id == ID_FILTER && code == EN_CHANGE) {
             refilter();
         } else if (id == ID_LIST && code == LBN_SELCHANGE) {

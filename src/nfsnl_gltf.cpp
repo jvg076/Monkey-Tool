@@ -16,7 +16,7 @@ namespace nfsnl {
 
 namespace {
 
-const char* kVersion = "Monkey Tool 1.3.0";
+const char* kVersion = "Monkey Tool 1.3.1";
 
 std::string jsonString(const std::string& s) {
     std::string o = "\"";
