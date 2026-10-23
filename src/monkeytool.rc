@@ -51,8 +51,8 @@ IDR_TOOLBARICONS 10 "toolbar_icons.png"
 
 
 1 VERSIONINFO
-FILEVERSION     1,3,1,0
-PRODUCTVERSION  1,3,1,0
+FILEVERSION     1,3,5,0
+PRODUCTVERSION  1,3,5,0
 FILEOS          VOS__WINDOWS32
 FILETYPE        VFT_APP
 BEGIN
@@ -62,9 +62,9 @@ BEGIN
         BEGIN
             VALUE "CompanyName",     "GM25"
             VALUE "FileDescription", "Monkey Tool - game asset extractor"
-            VALUE "FileVersion",     "1.3.1"
+            VALUE "FileVersion",     "1.3.5"
             VALUE "ProductName",     "Monkey Tool"
-            VALUE "ProductVersion",  "1.3.1"
+            VALUE "ProductVersion",  "1.3.5"
             VALUE "OriginalFilename","MonkeyTool.exe"
             VALUE "LegalCopyright",  "by GM25, September 2026"
         END

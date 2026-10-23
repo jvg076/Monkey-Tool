@@ -2,6 +2,127 @@
 
 Every release of Monkey Tool, newest first.
 
+## 1.3.5
+
+No Limits wheels, worked out from the game's own data files (car_setups, visualparts).
+
+### Fixed
+* **The stock wheel arch.** The wheel settings were read from the first wheel-arch part in a car's
+  visual parts, but the parts are not in order: the MX-5 lists its kit Z arch first, so its stock
+  car took the kit's +45 / +80 mm track and its tyres stood out of the wings. The stock arch
+  (`VP_WheelArchUpgrade_Stock`, SortValue 1) is now the one used.
+* **Stance values.** Track, camber and ride height come as one value per step of the stance
+  slider, lowest first. The last one is the car as it ships (ride height 0 on most cars); the
+  middle one was taken before.
+* **Ride height.** The stock arch's ride height is now applied: the Pajero Evolution stands
+  23.5 cm higher over its wheels, as in the game, the Defender 5 / 8 cm.
+* **Wheels named by the car's data (Agera RS, Polestar 1).** The search added in 1.3.4 decoded
+  the files under a lower-cased name, and the name is the key, so nothing was found. The Agera RS
+  now takes `wheel_koenigsegg_one1`, the Polestar 1 `wheel_shansen_vx_x`, as their stock wheel
+  parts say.
+* **Wheel size from the prefab.** The prefab's J_wheel scale round (the Elise's 0.868 / 0.873) is
+  the size the game draws the wheel at; the prefab's WheelRadius is the physics' tyre. The viewer
+  uses the scale now.
+* The command line reads a visual parts file saved as text (MT_VISUALPARTS=<file>.txt).
+
+## 1.3.4
+
+More No Limits fixes, from the cars sent in.
+
+### Fixed
+* **Small wheels on the G63.** Without the car's prefab the tyre size was taken from how high the
+  wheel joints sit above `J_car`. On the G63 `J_car` is half way up the suspension, not at the
+  ground, which gave it tyres 43 cm across. That height is now only used when it gives a tyre
+  near the wheel model's own size; otherwise the model's size is kept.
+* **Wheels standing out of the body (MX-5).** A track offset from the car's visual parts that
+  would put the tyre's face more than 1 cm outside the body side is cut back to there. The
+  viewer's info line now says the track it used.
+* **Defender cop with no car.** Its add-on set paints the roll cage and bull bar satin black
+  (`mesh_paint_satin`), which made it count as a whole car. Fixed-colour paints no longer count,
+  so the set goes on `land_rover_defender110_2015.sb3d` with its wheels.
+* **No wheels on the Agera RS and Polestar 1.** Neither has a `wheel_<car>.sb3d`. The tool now
+  looks for the wheel the car's own data names (stock setup, visual parts, prefab), and as a
+  last resort uses a wheel of the same make, marked as a stand-in in the info line.
+* The command line's `render` also hangs the road car's wheel on a cop set.
+
+## 1.3.3
+
+No Limits fixes, from the cars sent in.
+
+### Fixed
+* **Green trim (Corvette C8 and others).** Two untextured materials carry placeholder colours in
+  the file: `plasticdullopaque` is pure green (splitter, side skirts, window and headlight trim,
+  rear lower trim) and `paint_metallic_black` teal (mirrors, spoiler). An untextured material
+  whose name says black, or plastic / rubber / chassis / carbon / trim with a loud colour, is now
+  drawn black or dark plastic - in the viewer and in FBX / OBJ / glTF exports. The body paint is
+  untouched.
+* **See-through car (Sesto Elemento).** Its carbon body is on `carbondamageblur`, and every
+  material with "blur" in its name was blended like a wheel's spin card. Carbon, paint, chrome and
+  chassis materials are now always solid; glass, lenses, decals and light glows still blend.
+* **Parts that are not stock in the stock view** (Venom F5, Emira, 720S, 918, GT500, Demon and
+  the other 30 cars sent).
+  * The newer cars name their versions `stock`, `mainbumper_stock`, `splitter_stock`, and add
+    pieces like `splitter_gt_dd`, `ducktail_big_dd`, `fm_kit`, `snoop`. The tool did not know
+    these names and showed the add-ons with the stock car - the Venom's wide splitter, its side
+    pieces and second wing, the Emira's kit front and wing.
+  * Every part version is now sorted into stock, a kit letter or an extra (shown under "All").
+    Wheels are no longer pushed out to a wide-body kit's arches, since those are no longer
+    counted as the body side.
+* **Missing parts.** A stock part that only exists in carbon (the Agera RS's front bumper,
+  `standard_stock_carbon`; the P1 GTR's panels) was hidden as "the carbon option"; a slot with one
+  version only (the G63's rear bumper) was hidden as a kit. Both show now. The Agera's black body
+  is carbon in the file; its painted body is kit B.
+* **Cop cars.**
+  * **BMW i8 cop:** `bmw_i8_cop.sb3d` holds only the police parts (roll cage, bull bar, push bar,
+    light-bar brackets). The tool now puts them on the road car `bmw_i8.sb3d` (found beside it or
+    anywhere in the game), as the game draws them. Viewer and export.
+  * **Porsche 911 cop - no brake lights:** its tail lights are `taillights_b` and were hidden as
+    body kit B. A cop car has no body kits: every part it holds shows now.
+  * **Viper cop - no model:** the same kit problem took its bonnet, bumpers and sills. The "0
+    parts" screen came from the light bar (`cop_lights_01.m3g`): its parts landed on LOD00 while
+    the Viper starts at LOD02, so the viewer opened on a level holding only the light bar. A hung
+    model's levels now follow the car's.
+* **Tyres sticking out past the rim (Huayra, Daytona).** The setup's tyre widening (+60 / +80 mm)
+  was added to both sides of the tyre. It is added once, on the inner side, the way the wheel
+  model marks it (blue vertex colours); the rim face and the tyre's outer wall stay. The wheel
+  width now also comes from the car's prefab (the J_wheel joint's scale: the GT3 RS gets its
+  275 / 335 tyres).
+* **Car too high (Hot Wheels Time Attaxi).** The tyre was drawn at the standard 0.36 m radius;
+  this car's wheel joints are scaled to 0.79, and the joint sits one tyre radius above `J_car`,
+  the ground. The radius now comes from the prefab, else from the joint's height above `J_car`,
+  else from its scale. Cars opened without their prefab were about 4 cm too tall the same way.
+* **The same car twice in the tree** (Valkyrie AMR Pro, TT RS Iconic Edition). After an update the
+  game keeps the old .pack beside the new one (both named by hash), so an asset can be in two
+  packs. Only the newer copy is listed now - the one the game reads.
+
+### Removed
+* **"What's new?"** - it kept opening with thousands of assets listed as new. Removed.
+
+## 1.3.2
+
+### New
+* **"What's new?" after a game update.** Each time a game folder is opened the tool remembers
+  which assets it holds (in `%APPDATA%\MonkeyTool\versions`, one list per game folder). When the
+  game has been updated, the next opening shows a **What's new?** window: every asset that is
+  new, changed or removed, with its size before and now.
+  * Filter by new / changed / removed; double-click (or "Show in the tree") finds the asset in the
+    tree; "Export new and changed..." sends them through the Export window.
+  * Options > What's new? opens the last update's list again later.
+  * Assets are compared by path and size (the stored size inside an archive), not by reading
+    every file - so a 70,000-asset game is compared in a moment. A .pack renamed by the update
+    does not make its assets "new". The first opening of a folder only makes the list.
+* **Save Editor: VIP stage / level (No Limits)** in Quick edit, beside VIP points: the save's
+  number field whose name says VIP and level, tier, stage or rank. When a save has no such field
+  the box is not shown, and the stage follows the VIP points.
+
+### Fixed
+* **GitHub build (Actions).**
+  * Windows: `monkeytool_cli` included `dirent.h`, which Visual C++ does not have (MinGW does,
+    so BUILD.bat never saw it). The texture search uses `std::filesystem` now.
+  * Linux: the syntax check is run through `bash`, so it no longer needs the execute bit a zip
+    upload does not keep ("Permission denied", exit code 126).
+  * The release zip carries the licences of miniz, bc7enc, libogg and libvorbis.
+
 ## 1.3.1
 
 ### New

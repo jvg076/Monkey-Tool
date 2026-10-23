@@ -86,6 +86,8 @@ struct TOOLINFOW { UINT cbSize; UINT uFlags; HWND hwnd; UINT_PTR uId; RECT rect;
 #define TreeView_GetNextSibling(h,i) (HTREEITEM)SendMessageW((h), TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)(i))
 #define TreeView_GetPrevSibling(h,i) (HTREEITEM)SendMessageW((h), TVM_GETNEXTITEM, TVGN_PREVIOUS, (LPARAM)(i))
 #define TreeView_SelectItem(h,i) (BOOL)SendMessageW((h), TVM_SELECTITEM, TVGN_CARET, (LPARAM)(i))
+#define TVM_ENSUREVISIBLE (0x1100 + 20)
+#define TreeView_EnsureVisible(h,i) (BOOL)SendMessageW((h), TVM_ENSUREVISIBLE, 0, (LPARAM)(i))
 
 #define NM_RCLICK (0U-5U)
 #define TVM_HITTEST 0x1111

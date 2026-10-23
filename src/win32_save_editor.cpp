@@ -64,7 +64,7 @@ enum {
     ID_OPEN = 100, ID_CALIB, ID_FILTER, ID_LIST, ID_APPLY, ID_SAVE, ID_PICTURE, ID_NAME, ID_PREMIUM,
     ID_QUICK0 = 200,
 };
-const int kMaxQuick = 14;
+const int kMaxQuick = 16;
 
 // ------------------------------------------------------------------ state
 struct Editor {
@@ -139,6 +139,34 @@ bool fieldSet(const std::pair<bool, size_t>& f, const std::string& v, std::strin
 }
 
 void refilter();
+
+// No Limits' VIP stage: the save's number field whose name says VIP and level
+// (or tier, stage, rank) - found by name, as the game moves it between
+// versions. -1 when the save holds none; then the stage follows the VIP
+// points (a quick field of its own).
+long nfsVipLevelLeaf() {
+    long best = -1;
+    for (size_t i = 0; i < E.nfs.leaves.size(); ++i) {
+        const NfsLeaf& l = E.nfs.leaves[i];
+        std::string n = lowerStr(l.path);
+        if (n.find("vip") == std::string::npos) continue;
+        bool lvl = false;
+        for (const char* k : { "level", "tier", "stage", "rank" }) if (n.find(k) != std::string::npos) lvl = true;
+        if (!lvl) continue;
+        bool skip = false;
+        for (const char* k : { "point", "reward", "claimed", "seen", "shown", "popup", "time", "date", "progress",
+                               "threshold", "required", "cost" })
+            if (n.find(k) != std::string::npos) skip = true;
+        if (skip || !E.nfs.editable(l)) continue;
+        std::string v = trimmed(E.nfs.get(l));
+        char* end = nullptr;
+        double d = strtod(v.c_str(), &end);
+        if (v.empty() || !end || *end || d < 0 || d > 1000) continue;
+        // the plainest name wins: .../VIPLevel/Value before .../VIPLevelRewards/...
+        if (best < 0 || l.path.size() < E.nfs.leaves[(size_t)best].path.size()) best = (long)i;
+    }
+    return best;
+}
 // ---- premium / VIP: the on/off flags the save keeps about the player's
 // account (paying player, VIP, subscription). They are found by name - a
 // yes/no field whose name says vip, premium or subscriber - not by a fixed
@@ -423,6 +451,7 @@ void fillQuick() {
     if (E.game == "nfs") {
         ShowWindow(E.btnCalib, SW_HIDE);
         setText(E.lblHint, "");
+        ShowWindow(E.lblHint, SW_HIDE);           // the last row of boxes sits where it was
         int i = 0;
         for (const NfsMain& m : nfsMainFields()) {
             const NfsLeaf* l = E.nfs.find(m.path);
@@ -432,8 +461,15 @@ void fillQuick() {
             EnableWindow(E.quickEd[i], TRUE);
             ++i;
         }
+        long v = nfsVipLevelLeaf();
+        if (v >= 0 && i < kMaxQuick) {
+            setText(E.quickLbl[i], "VIP stage / level:");
+            setText(E.quickEd[i], E.nfs.get(E.nfs.leaves[(size_t)v]));
+            EnableWindow(E.quickEd[i], TRUE);
+        }
         return;
     }
+    ShowWindow(E.lblHint, SW_SHOW);
     if (E.game != "rr3") return;
     ShowWindow(E.btnCalib, SW_SHOW);
     bool calibrated = false;
@@ -540,6 +576,18 @@ bool applyQuick(std::string& err) {
             if (t.empty() || t == E.nfs.get(*l)) continue;
             if (!E.nfs.setMain(m, t, err)) return false;
             E.dirty = true;
+        }
+        long v = nfsVipLevelLeaf();
+        if (v >= 0 && i < kMaxQuick) {
+            NfsLeaf leaf = E.nfs.leaves[(size_t)v];
+            std::string t = trimmed(getText(E.quickEd[i]));
+            if (!t.empty() && t != E.nfs.get(leaf)) {
+                char* end = nullptr;
+                long n = strtol(t.c_str(), &end, 10);
+                if (!end || *end || n < 0 || n > 1000) { err = "VIP stage / level: a whole number, 0 to 1000"; return false; }
+                if (!E.nfs.set(leaf, t, err)) { err = "VIP stage / level: " + err; return false; }
+                E.dirty = true;
+            }
         }
         return true;
     }

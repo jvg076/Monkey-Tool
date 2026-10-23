@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdarg>
+#include <map>
 
 namespace nfsnl {
 static float halfToFloat(uint16_t h) {
@@ -274,6 +275,32 @@ bool looksLikeMaterialName(const std::string& s) {
     return underscore;
 }
 
+// An untextured material's DiffuseColor is what it is drawn in, but some
+// cars carry an artist's leftover there: the Corvette C8's trim
+// (plasticdullopaque: splitter, skirts, window and headlight surrounds) is
+// pure green (0,1,0) and its paint_metallic_black a teal (0.16,0.40,0.50),
+// which the game never shows - its shaders draw those parts black. Where the
+// name says the colour or the finish and the stated colour plainly
+// disagrees, the name wins; a colour that fits (bronze chrome, a grey
+// plastic) is kept.
+void fixUntexturedColour(Material& mat) {
+    if (!mat.diffuse.empty() || !mat.hasColor) return;
+    std::string m = mat.name;
+    for (char& c : m) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    auto has = [&](const char* w) { return m.find(w) != std::string::npos; };
+    float* c = mat.color;
+    float hi = std::max({ c[0], c[1], c[2] }), lo = std::min({ c[0], c[1], c[2] });
+    float set = -1;
+    if (has("black")) {
+        if (hi > 0.25f) set = 0.04f;                    // black, not a grey or a teal
+    } else if (has("white") || has("glass") || has("light") || has("lamp") || has("lens")) {
+        // a colour or a tint of its own: left as stated
+    } else if (has("plastic") || has("rubber") || has("chassis") || has("carbon") || has("trim")) {
+        if (hi - lo > 0.5f) set = 0.08f;                // a loud placeholder hue on dark trim
+    }
+    if (set >= 0) c[0] = c[1] = c[2] = set;
+}
+
 // One submesh's triangles inside its mesh's index list, and its material.
 struct SubRange { size_t start = 0, count = 0; int material = -1; };
 
@@ -406,6 +433,7 @@ std::vector<Material> readMaterialTable(const std::vector<SbinChunk>& chunks) {
                 }
             }
         renderStatesFromName(mat);
+        fixUntexturedColour(mat);
         if (table.size() <= index) table.resize(index + 1);
         table[index] = mat;
     }
@@ -553,6 +581,156 @@ void assignMaterials(Model& model, const std::vector<SbinChunk>& chunks) {
     }
 }
 
+// A variant node's name taken apart: what it says about the kit it belongs
+// to. The names follow no single scheme - stock, standard, type_a,
+// standard_type_b_paint, kit_z, mainbumper_stock, splitter_type_b,
+// splitter_gt_dd, overfender_large, stock_up, type_b1 ...
+struct VariantName {
+    char letter = 0;          // type_b / kit_z / standard_b_paint -> b, z, b
+    bool typeA = false;       // the letter is a from type_a
+    bool stockWord = false;   // stock, standard, default
+    bool tier = false;        // _da .. _dd: the add-on parts of the tuning tiers
+    bool size = false;        // large, small, big, pulled: the wide-body versions
+    bool overfender = false;
+    bool numbered = false;    // type_b1: a second take on a version
+    std::vector<std::string> prefix;      // the sub-part before the version: mainbumper, splitter
+    std::vector<std::string> qualifiers;  // what follows it: carbon, paint, up, lip ...
+};
+
+VariantName parseVariant(const std::string& v) {
+    VariantName p;
+    std::vector<std::string> t;
+    size_t a = 0;
+    while (a <= v.size()) {
+        size_t b = v.find('_', a);
+        if (b == std::string::npos) b = v.size();
+        if (b > a) t.push_back(v.substr(a, b - a));
+        a = b + 1;
+    }
+    auto lowerLetter = [](char c) { return c >= 'a' && c <= 'z'; };
+    auto isTier = [&](const std::string& w) { return w.size() == 2 && w[0] == 'd' && lowerLetter(w[1]); };
+    for (size_t i = 0; i < t.size(); ++i) {
+        const std::string& w = t[i];
+        bool designated = p.letter || p.stockWord;
+        if (w == "stock" || w == "standard" || w == "default") { p.stockWord = true; continue; }
+        if ((w == "type" || w == "kit") && i + 1 < t.size()) {
+            const std::string& n = t[i + 1];
+            bool digits = n.size() > 1 && lowerLetter(n[0]);
+            for (size_t k = 1; digits && k < n.size(); ++k) digits = n[k] >= '0' && n[k] <= '9';
+            bool letters = !n.empty();
+            for (char c : n) letters = letters && lowerLetter(c);
+            if (n.size() == 1 && lowerLetter(n[0])) {
+                p.letter = n[0];
+                p.typeA = w == "type" && n[0] == 'a';
+                ++i;
+                continue;
+            }
+            if (w == "type" && isTier(n)) { p.tier = true; ++i; continue; }
+            if (digits) { p.letter = n[0]; p.numbered = true; ++i; continue; }
+            // kit_yz_share: the parts kits y and z have in common
+            if (w == "kit" && letters && n.size() <= 3) { p.letter = n[0]; ++i; continue; }
+        }
+        if (w.size() == 1 && lowerLetter(w[0])) { p.letter = w[0]; continue; }
+        if (isTier(w)) { p.tier = true; continue; }
+        if (w == "large" || w == "small" || w == "big" || w == "pulled" || w == "wide" || w == "widebody") {
+            p.size = true;
+            continue;
+        }
+        if (w == "overfender" || w == "overfenders") { p.overfender = true; continue; }
+        if (designated) p.qualifiers.push_back(w);
+        else p.prefix.push_back(w);
+    }
+    return p;
+}
+
+// The kit a body-kit variant belongs to: 'a' for the car as it ships, a
+// letter for a kit, '+' for the extras (tier add-ons, wide-body versions,
+// carbon or painted twins of a part) that only "all" shows. sub is the
+// sub-part (mainbumper, splitter) so a kit's splitter replaces only the stock
+// splitter. Anything that cannot be placed is not drawn with the stock car:
+// left unclassified it was drawn with every kit, which is how the stock view
+// picked up other kits' bumpers, spoilers and arches.
+char variantKit(const std::string& v, const std::vector<std::string>& siblings, bool stockNamed,
+                const std::string& meshName, std::string& sub, bool nested = false) {
+    sub.clear();
+    // slot/lod_00/mesh: the slot has one version only, and that is stock
+    // whatever the mesh names say (the G63's rear bumper is bumper_rear_c)
+    if (v.size() == 6 && v.compare(0, 4, "lod_") == 0 && v[4] >= '0' && v[4] <= '9' && v[5] >= '0' && v[5] <= '9')
+        return 'a';
+    VariantName p = parseVariant(v);
+    for (const std::string& w : p.prefix) sub += (sub.empty() ? "" : "_") + w;
+    // the tuning tiers' parts (splitter_gt_dd, ducktail_compact_db, large_dd)
+    if (p.tier || p.numbered) return '+';
+    // the wide-body versions: overfender_large, small_type_a,
+    // mainbumper_stock_large, splitter_large_stock
+    if (p.size) return '+';
+    char k = p.letter ? p.letter : (p.stockWord ? 'a' : 0);
+    if (p.overfender && (k == 0 || k == 'a')) return '+';
+    if (!k) {
+        // A name that says nothing: a named kit (snoop, ken_block, fm_kit,
+        // airhump) or a piece of the stock car (arch_side_badge, the GT500's
+        // rear_windows). A slot that has its stock version already gets no
+        // more from it but badges; otherwise the mesh's own name tells stock
+        // (windows_rear_a) from the rest - by itself it is no proof, the
+        // Emira's fm_kit has bumper_front_a pieces too.
+        if (nested) return 0;
+        bool badge = v.find("badg") != std::string::npos;
+        if (!badge)
+            for (const std::string& s : siblings) {
+                std::string ignored;
+                if (s != v && variantKit(s, siblings, stockNamed, std::string(), ignored, true) == 'a') return '+';
+            }
+        std::string n = meshName;
+        if (n.rfind("mesh_", 0) == 0) n.erase(0, 5);
+        size_t l = n.rfind("_lod");
+        if (l != std::string::npos) n.erase(l);
+        std::vector<std::string> t;
+        size_t a = 0;
+        while (a <= n.size()) {
+            size_t b = n.find('_', a);
+            if (b == std::string::npos) b = n.size();
+            if (b > a) t.push_back(n.substr(a, b - a));
+            a = b + 1;
+        }
+        for (const std::string& w : t) if (w == "a") return 'a';
+        return '+';
+    }
+    // A qualifier makes a twin of another version (stock_carbon beside stock,
+    // stock_up beside stock, kit_z_plus beside kit_z): the twin is an extra.
+    // Without the plain one it is the version itself - the Agera RS's stock
+    // front bumper is standard_stock_carbon, the P1 GTR's type_a_carbon.
+    std::vector<std::string> q;
+    for (const std::string& w : p.qualifiers)
+        if (w != "fixed" && w != "badging" && w != "badge" && w != "share") q.push_back(w);
+    if (!q.empty()) {
+        std::string base;
+        size_t a = 0;
+        while (a <= v.size()) {
+            size_t b = v.find('_', a);
+            if (b == std::string::npos) b = v.size();
+            std::string w = v.substr(a, b - a);
+            if (b > a && std::find(q.begin(), q.end(), w) == q.end()) base += (base.empty() ? "" : "_") + w;
+            a = b + 1;
+        }
+        if (std::find(siblings.begin(), siblings.end(), base) != siblings.end()) return '+';
+        for (const std::string& w : q)
+            if (w != "carbon" && w != "paint") return '+';
+    }
+    // A car that names its stock parts "stock" uses type_a for the first
+    // option of a slot (the GT500's roof louvers, the Supra's carbon
+    // mirrors), not for stock - unless it is the slot's only version (the
+    // Venom F5's headlights).
+    if (p.typeA && stockNamed) {
+        for (const std::string& s : siblings) {
+            if (s == v) continue;
+            VariantName o = parseVariant(s);
+            if (o.tier || o.size || o.numbered) continue;
+            if ((o.stockWord && !o.letter) || (o.letter && o.letter != 'a')) return '+';
+        }
+    }
+    return k;
+}
+
 } // namespace
 
 Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
@@ -649,7 +827,10 @@ Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
     // children of the "mesh" node) names the version - standard_type_a,
     // type_b, kit_y, pulled_type_a, large, type_a_carbon ...
     std::vector<std::string> nodeSlot, nodeVariant, treeNames;
-    std::vector<int> treeParent;
+    std::vector<int> treeParent, nodeSlotAt;
+    // each slot's versions, and whether the car calls its stock parts "stock"
+    std::map<int, std::vector<std::string>> slotVariants;
+    bool stockNamed = false;
     if (sub[0].count > 0 && sub[2].count == sub[0].count && sub[4].count == sub[0].count &&
         sub[0].count < 200000) {
         int n = sub[0].count;
@@ -685,18 +866,26 @@ Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
         if (ok) {
             nodeSlot.assign(n, std::string());
             nodeVariant.assign(n, std::string());
+            nodeSlotAt.assign(n, -1);
             for (int i = 0; i < n; ++i) {
                 int at = i, below = -1, guard = 0;
                 while (at >= 0 && guard++ < 64) {
                     int pa = parent[at];
                     if (pa >= 0 && nodeName[pa] == "mesh") {
                         nodeSlot[i] = nodeName[at];
+                        nodeSlotAt[i] = at;
                         if (below >= 0) nodeVariant[i] = nodeName[below];
                         break;
                     }
                     below = at;
                     at = pa;
                 }
+            }
+            for (int i = 0; i < n; ++i) {
+                int pa = parent[i];
+                if (pa < 0 || parent[pa] < 0 || nodeName[parent[pa]] != "mesh") continue;
+                slotVariants[pa].push_back(nodeName[i]);
+                if (nodeName[i] == "stock") stockNamed = true;
             }
         }
         if (ok) {
@@ -724,8 +913,11 @@ Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
     // named points: they say where the game puts the wheels, lights and
     // exhausts, which a car without brake discs (the cop cars) needs.
     // Each node's matrix is already its place on the car, as the meshes use it.
+    // J_car and J_chassis come too: the car's prefab moves J_chassis (the
+    // body) to its own ride height, and the body is lowered by the difference.
     for (size_t i = 0; i < treeNames.size() && i < matrices.size(); ++i) {
-        if (treeNames[i].rfind("locator_", 0) != 0 && treeNames[i].rfind("J_wheel_", 0) != 0) continue;
+        if (treeNames[i].rfind("locator_", 0) != 0 && treeNames[i].rfind("J_wheel_", 0) != 0 &&
+            treeNames[i] != "J_car" && treeNames[i] != "J_chassis") continue;
         Hardpoint h;
         h.name = treeNames[i];
         const float* m = matrices[i].data();
@@ -1014,24 +1206,17 @@ Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
         }
         if (sh.boneIndex >= 0 && (size_t)sh.boneIndex < nodeSlot.size() && !nodeSlot[sh.boneIndex].empty() &&
             !nodeVariant[sh.boneIndex].empty()) {
-            // stock is standard_type_a / type_a / standard; kit_y -> y; the
-            // wider arches (pulled, large) and carbon versions are extras
-            const std::string& v = nodeVariant[sh.boneIndex];
-            char letter = 0;
-            if (v.find("carbon") != std::string::npos || v.compare(0, 6, "pulled") == 0 ||
-                v.compare(0, 5, "large") == 0)
-                letter = '+';
-            else if (v.compare(0, 4, "kit_") == 0 && v.size() >= 5)
-                letter = v[4];
-            else if (v == "standard")
-                letter = 'a';
-            else {
-                size_t t = v.find("type_");
-                if (t != std::string::npos && t + 5 < v.size()) letter = v[t + 5];
-            }
+            // stock is stock / standard / type_a / mainbumper_stock; kit_y
+            // -> y, type_b -> b; the tier add-ons, wider arches and twins
+            // (carbon beside plain, stock_up beside stock) are extras
+            static const std::vector<std::string> none;
+            auto sv = slotVariants.find(nodeSlotAt[sh.boneIndex]);
+            std::string part;
+            char letter = variantKit(nodeVariant[sh.boneIndex], sv == slotVariants.end() ? none : sv->second,
+                                     stockNamed, mesh.name, part);
             if (letter) {
                 mesh.kit = letter;
-                mesh.kitSlot = nodeSlot[sh.boneIndex];
+                mesh.kitSlot = nodeSlot[sh.boneIndex] + (part.empty() ? "" : "_" + part);
             }
         }
         for (int k = 0; k < 3; ++k) {
@@ -1336,6 +1521,20 @@ Model loadSb3d(const uint8_t* data, size_t len, bool flipV) {
     }
 
     assignKits(model);
+    // A police car (cop_parts, cop_flasher, cop_bumper_rear_enf ... in its
+    // node tree) is never tuned: the game draws every part its file holds.
+    // The letters only say which version of the road car's part the cop was
+    // built from - the 911's taillights_b, the Viper's hood_b, bumper_front_d
+    // and sideskirts_d - and read as body kits the stock view hid them, which
+    // left the 911 without tail lights and the Viper without bonnet, bumpers
+    // and sills. Every part is the stock one here ('a' rather than none, so
+    // loadModel does not read kits from the names again).
+    for (const std::string& n : treeNames)
+        if (n.compare(0, 4, "cop_") == 0) {
+            for (Mesh& m : model.meshes)
+                if (m.lod != "HELPERS") m.kit = 'a';
+            break;
+        }
     model.valid = !model.meshes.empty();
     if (!model.valid) model.warnings.push_back("no usable meshes decoded");
     return model;
@@ -1473,7 +1672,7 @@ void appendNums(std::string& s, const float* v, size_t count, int dec) {
 std::string writeObjString(const Model& m) {
     std::string s;
     s.reserve(1 << 20);
-    s += "# exported by Monkey Tool 1.3.1\n";
+    s += "# exported by Monkey Tool 1.3.5\n";
     size_t baseV = 1;
     for (const Mesh& mesh : m.meshes) {
         // group by LOD so an OBJ viewer shows the same tree the FBX does
@@ -1550,11 +1749,11 @@ std::string writeFbxString(const Model& m) {
     std::string s;
     s.reserve(1 << 22);
     s += "; FBX 7.3.0 project file\n"
-         "; Exported by Monkey Tool 1.3.1\n\n"
+         "; Exported by Monkey Tool 1.3.5\n\n"
          "FBXHeaderExtension:  {\n"
          "    FBXHeaderVersion: 1003\n"
          "    FBXVersion: 7300\n"
-         "    Creator: \"Monkey Tool 1.3.1 by GM25\"\n"
+         "    Creator: \"Monkey Tool 1.3.5 by GM25\"\n"
          "}\n"
          "GlobalSettings:  {\n"
          "    Version: 1000\n"
@@ -2513,24 +2712,44 @@ bool nlVisualPartsMatches(const std::string& file, const std::string& carId) {
 }
 
 bool nlVisualPartsWheelTweak(const uint8_t* d, size_t n, NlWheelTweak& out) {
+    return nlVisualPartsWheelTweakText(sbinObjectsText(d, n), out);
+}
+
+bool nlVisualPartsWheelTweakText(const std::string& t, NlWheelTweak& out) {
     out = NlWheelTweak();
-    std::string t = sbinObjectsText(d, n);
-    size_t p = t.find("FrontTireWidthOffset");
-    if (p == std::string::npos) p = t.find("RearTireWidthOffset");
-    if (p == std::string::npos) return false;
-    // the block that holds it: the stock arch comes first
-    size_t a = t.rfind("VisualPart = {", p);
-    if (a == std::string::npos) a = p > 2000 ? p - 2000 : 0;
-    size_t b = t.find('}', p);
-    if (b == std::string::npos) b = t.size();
-    std::string blk = t.substr(a, b - a);
+    // Every WheelArchUpgrade part, and of them the stock one: DisplayText
+    // VP_WheelArchUpgrade_Stock (SortValue 1, unlocked from the start). The
+    // parts are not in order - the MX-5 lists its kit Z arch first, and
+    // taking the first one gave its stock car the kit's +45 / +80 mm track
+    // and its tyres stood out of the wings.
+    std::vector<std::string> blocks;
+    size_t a = 0;
+    while ((a = t.find("VisualPart = {", a)) != std::string::npos) {
+        size_t b = t.find("VisualPart = {", a + 14);
+        std::string blk = t.substr(a, (b == std::string::npos ? t.size() : b) - a);
+        if (blk.find("PartType = WheelArchUpgrade") != std::string::npos) blocks.push_back(blk);
+        a = b == std::string::npos ? t.size() : b;
+    }
+    if (blocks.empty()) return false;
+    int pick = -1, score = -1;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const std::string& blk = blocks[i];
+        int sc = 0;
+        if (blk.find("_Stock\n") != std::string::npos || blk.find("WheelArchUpgrade_Stock") != std::string::npos) sc += 4;
+        if (blk.find("SortValue = 1\n") != std::string::npos) sc += 2;
+        if (blk.find("UnlockStockCarStageIndexMod = 0\n") != std::string::npos) sc += 1;
+        if (sc > score) { score = sc; pick = (int)i; }
+    }
+    const std::string& blk = blocks[pick];
     auto num = [&](const char* key, float& v) {
         std::string k = std::string(key) + " = ";
         size_t q = blk.find(k);
         if (q == std::string::npos) return;
         q += k.size();
         if (blk[q] == '[') {
-            // one value per stance; the middle one is the standard stance
+            // one value per step of the stance slider, lowest first; the
+            // last is the car as it ships (ride height 0, camber -1.5 on
+            // most cars: [-10, -4, -1.5]). An empty list is no change.
             std::vector<float> vals;
             const char* s = blk.c_str() + q + 1;
             while (*s && *s != ']') {
@@ -2540,7 +2759,7 @@ bool nlVisualPartsWheelTweak(const uint8_t* d, size_t n, NlWheelTweak& out) {
                 vals.push_back(f);
                 s = e;
             }
-            if (!vals.empty()) v = vals[vals.size() / 2];
+            v = vals.empty() ? 0.0f : vals.back();
         } else {
             char* e;
             float f = strtof(blk.c_str() + q, &e);
@@ -2555,11 +2774,14 @@ bool nlVisualPartsWheelTweak(const uint8_t* d, size_t n, NlWheelTweak& out) {
     num("RearTireProfileOffset", out.profileOffset[1]);
     num("FrontWheelOffset", out.wheelOffset[0]);
     num("RearWheelOffset", out.wheelOffset[1]);
+    num("FrontRideHeight", out.rideHeight[0]);
+    num("RearRideHeight", out.rideHeight[1]);
     for (int k = 0; k < 2; ++k) {
         if (!(out.widthOffset[k] > -0.2f && out.widthOffset[k] < 0.4f)) out.widthOffset[k] = 0;
         if (!(out.radiusScale[k] > 0.5f && out.radiusScale[k] < 2.0f)) out.radiusScale[k] = 1;
         if (!(out.profileOffset[k] > -0.1f && out.profileOffset[k] < 0.2f)) out.profileOffset[k] = 0;
         if (!(out.wheelOffset[k] > -0.2f && out.wheelOffset[k] < 0.2f)) out.wheelOffset[k] = 0;
+        if (!(out.rideHeight[k] > -0.3f && out.rideHeight[k] < 0.4f)) out.rideHeight[k] = 0;
     }
     out.valid = true;
     return true;
@@ -2906,7 +3128,8 @@ void nlTintImage(Image& img, const std::vector<uint8_t>& mask, const float rgb[3
     }
 }
 
-int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, const NlWheelTweak* tweak) {
+int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, const NlWheelTweak* tweak,
+                   const float* axleWidth, const float* axleScale) {
     if (!wheel.valid || wheel.meshes.empty()) return 0;
 
     // the wheel: its finest LOD, blur cards left out
@@ -2940,9 +3163,7 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
             if (r < radius * 0.25f) mountX = std::max(mountX, m->positions[i]);
         }
     if (mountX < -1e29f) mountX = (xLo + xHi) * 0.5f;
-    // the tyre (material tire / tyre) across and the rim's radius: a wider
-    // tyre is the model pulled apart at the middle of the tread, both sides
-    // moving out by half the extra width (the rim's barrel stretches with it)
+    // the tyre (material tire / tyre) across and the rim's radius
     auto isTyre = [](const Mesh& m) {
         std::string s = m.material + " " + m.name;
         for (char& ch : s) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
@@ -2961,6 +3182,24 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
         }
     float tyreMid = tLo < tHi ? (tLo + tHi) * 0.5f : (xLo + xHi) * 0.5f;
     if (rimR <= 0 || rimR >= radius * 0.98f) rimR = radius * 0.7f;
+    // What a wider tyre (TireWidthOffset) moves: the wheel model paints those
+    // vertices pure blue (0, 0, 1) - the inner half of the tyre and, on rims
+    // made for it (the Huayra's, the Daytona's), the inner lip of the barrel.
+    // They go inwards by the whole offset; the rim's face and the tyre's outer
+    // wall stay where they are, so the tyre never stands proud of the rim.
+    // (Moving both sides out by the offset made the Huayra's rear tyre 16 cm
+    // wider than its rim, a balloon around it.) The rest of the colours are
+    // shading (grey) and stay put.
+    auto widenWeight = [](const Mesh& m, size_t v) -> float {
+        if (m.colors.size() < (v + 1) * 4) return 0.0f;
+        const float* c = &m.colors[v * 4];
+        return (c[0] < 0.2f && c[1] < 0.2f && c[2] > 0.5f) ? c[2] : 0.0f;
+    };
+    auto widenMarked = [&](const Mesh& m) {
+        for (size_t v = 0; v * 3 + 2 < m.positions.size(); ++v)
+            if (widenWeight(m, v) > 0) return true;
+        return false;
+    };
 
     // ---- the four discs, found by where they are rather than what they are
     // called. The names cannot be trusted: the Nissan Z calls all four of its
@@ -3026,6 +3265,54 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
             if (h.name == kJoint[q]) { joint[q] = &h; ++joints; break; }
     if (joints < 4) for (auto& j : joint) j = nullptr;
 
+    // Each axle's scale, along the radius and across. The prefab's
+    // WheelRadius sets the radius and its J_wheel_* scale the width (the 911
+    // GT3 RS: 1.1 front, 1.34 rear across, 0.97 and 1.02 round). Without a
+    // prefab the rig says the same: J_car is the ground the car stands on and
+    // each wheel joint sits one WheelRadius above it (the Elise, Cayman GT4,
+    // 911 GT3 RS and Huayra all to the millimetre), and some cars' joints
+    // carry the scale across too (the Hot Wheels Time Attaxi's: 0.80, its
+    // tyres 28 cm round, not the model's 36 cm). Left at the model's size the
+    // Attaxi stood on tyres 27% too big, its body lifted 7.6 cm off the
+    // ground, and every car without its prefab stood 4 cm too tall.
+    const Hardpoint* ground = nullptr;
+    for (const Hardpoint& h : car.points) if (h.name == "J_car") { ground = &h; break; }
+    float sr[2] = { 1, 1 }, sw[2] = { 1, 1 };
+    for (int ax = 0; ax < 2; ++ax) {
+        const Hardpoint* j = joint[ax * 2];
+        float jx = 1, jy = 1;
+        if (j) {
+            jx = std::sqrt(j->basis[0] * j->basis[0] + j->basis[3] * j->basis[3] + j->basis[6] * j->basis[6]);
+            jy = std::sqrt(j->basis[1] * j->basis[1] + j->basis[4] * j->basis[4] + j->basis[7] * j->basis[7]);
+            if (!(jx > 0.3f && jx < 3.0f)) jx = 1;
+            if (!(jy > 0.3f && jy < 3.0f)) jy = 1;
+        }
+        bool jointScaled = std::fabs(jx - 1) > 0.005f || std::fabs(jy - 1) > 0.005f;
+        float above = j && ground ? j->pos[1] - ground->pos[1] : 0.0f;
+        if (j && axleScale && axleScale[ax] > 0.3f && axleScale[ax] < 3.0f)
+            sr[ax] = axleScale[ax];
+        else if (j && axleRadius && radius > 1e-3f && axleRadius[ax] > 0.1f && axleRadius[ax] < 1.5f)
+            sr[ax] = axleRadius[ax] / radius;
+        else if (above > 0.15f && above < 0.8f && radius > 1e-3f &&
+                 above / radius > 0.7f && above / radius < 1.35f)
+            // (only when it says a tyre near the model's own size: on the
+            // G63 J_car sits 21 cm under the hubs, half way up the
+            // suspension, and taking it as the ground gave it tyres 43 cm
+            // across inside its arches)
+            sr[ax] = above / radius;
+        else if (j)
+            sr[ax] = jy;
+        if (j && axleWidth && axleWidth[ax] > 0.3f && axleWidth[ax] < 3.0f) sw[ax] = axleWidth[ax];
+        else if (j && jointScaled) sw[ax] = jx;
+        else sw[ax] = sr[ax];
+        if (tweak && tweak->valid) { sr[ax] *= tweak->radiusScale[ax]; sw[ax] *= tweak->radiusScale[ax]; }
+    }
+
+    // the visual parts' WheelOffset (track) per corner, cut back where it
+    // would put the tyre's face outside the body over it (below)
+    float trackUse[4] = { 0, 0, 0, 0 };
+    for (int q = 0; q < 4; ++q) trackUse[q] = tweak && tweak->valid ? tweak->wheelOffset[q < 2 ? 0 : 1] : 0.0f;
+    int trackCut = 0;
     int placed = 0, pushedOut = 0, onJoints = 0;
     float moved[4][2] = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } };   // hub moved off its joint (y, z)
     std::vector<Mesh> added;
@@ -3037,6 +3324,10 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
             // the wheel model's origin on the joint, the right-hand ones
             // turned half a turn as below
             hubY = joint[q]->pos[1];
+            // the stock arch's ride height: the body stands that much higher
+            // over its wheels (the Pajero Evolution's +23.5 cm, its rally-raid
+            // stance; most cars 0)
+            if (tweak && tweak->valid) hubY -= tweak->rideHeight[q < 2 ? 0 : 1];
             hubZ = joint[q]->pos[2];
             offX = joint[q]->pos[0];
             ++onJoints;
@@ -3052,11 +3343,10 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
             // body side over the wheel, by at most 8 cm, never inwards.
             {
                 int ax = q < 2 ? 0 : 1;
-                float sc = 1.0f;
-                if (axleRadius && radius > 1e-3f && axleRadius[ax] > 0.1f && axleRadius[ax] < 1.5f) sc = axleRadius[ax] / radius;
-                float extra = 0;
-                if (tweak && tweak->valid) { sc *= tweak->radiusScale[ax]; extra = tweak->widthOffset[ax] + tweak->wheelOffset[ax]; }
-                float tyreOut = std::fabs(offX) - xLo * sc + extra;
+                float sc = sr[ax];
+                // (a wider tyre grows inwards: only WheelOffset moves the face)
+                float extra = tweak && tweak->valid ? tweak->wheelOffset[ax] : 0.0f;
+                float tyreOut = std::fabs(offX) - xLo * sw[ax] + extra;
                 float body = 0;
                 for (size_t mi = 0; mi < car.meshes.size(); ++mi) {
                     const Mesh& m = car.meshes[mi];
@@ -3069,8 +3359,18 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
                         body = std::max(body, std::fabs(v[0]));
                     }
                 }
+                // A track offset that would stand the tyre outside the body
+                // side (more than 1 cm past it) is cut back to there: the
+                // MX-5's stock arch carries one and its rear tyres stood a
+                // tyre's width out of the wings.
+                if (body > 0 && extra > 0 && tyreOut > body + 0.01f) {
+                    float keep = std::max(0.0f, extra - (tyreOut - (body + 0.01f)));
+                    tyreOut -= extra - keep;
+                    trackUse[q] = keep;
+                    ++trackCut;
+                }
                 float gap = body - tyreOut;
-                if (getenv("MT_WHEELDBG")) fprintf(stderr, "corner %d tyre %.3f body %.3f\n", q, tyreOut, body);
+                if (getenv("MT_WHEELDBG")) fprintf(stderr, "corner %d tyre %.3f body %.3f joint %.3f %.3f %.3f ground %.3f xLo %.3f xHi %.3f mount %.3f r %.3f sr %.3f sw %.3f\n", q, tyreOut, body, offX, hubY, hubZ, ground ? ground->pos[1] : -9.f, xLo, xHi, mountX, radius, sr[ax], sw[ax]);
                 if (body > 0 && gap > 0.03f && gap < 0.15f) {
                     float shift = std::min(gap - 0.015f, 0.08f);
                     offX += c.right ? shift : -shift;
@@ -3093,7 +3393,7 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
         // of it, it is moved out to 1.5 cm short; never moved in.
         {
             float tyreOut = c.right ? offX - xLo : -(xLo + offX);   // |x| of the outer face
-            if (tweak && tweak->valid) tyreOut += tweak->widthOffset[q < 2 ? 0 : 1] + tweak->wheelOffset[q < 2 ? 0 : 1];
+            if (tweak && tweak->valid) tyreOut += tweak->wheelOffset[q < 2 ? 0 : 1];
             float body = 0;
             for (size_t mi = 0; mi < car.meshes.size(); ++mi) {
                 const Mesh& m = car.meshes[mi];
@@ -3124,25 +3424,22 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
             if (m.lod.empty()) m.lod = "LOD00";
             // the car's prefab gives each axle's tyre radius (the Elise runs
             // 0.30 m front, 0.32 m rear on a wheel model 0.36 m across): the
-            // game scales the one wheel model to it
-            float sc = 1.0f;
-            if (axleRadius && joint[q] && radius > 1e-3f) {
-                float want = axleRadius[q < 2 ? 0 : 1];
-                if (want > 0.1f && want < 1.5f) sc = want / radius;
-            }
+            // game scales the one wheel model to it, and across by sw (above)
             int axle = q < 2 ? 0 : 1;
-            // TireWidthOffset: each side of the tyre moves out by it (the
-            // F132's rear tyre gains 2 x 11 cm, as wide as in the game), the
-            // rim stays as it is and sits deeper in the tyre - the deep dish
-            // the game shows
-            float half = 0, prof = 0, track = 0;
+            float sc = joint[q] ? sr[axle] : (tweak && tweak->valid ? tweak->radiusScale[axle] : 1.0f);
+            float sx = joint[q] ? sw[axle] : sc;
+            // TireWidthOffset: the marked inner side moves in by it (see
+            // widenWeight); a tyre without the marks moves its inner half.
+            // The F132's rear tyre gains its 11 cm, the Huayra's rear its
+            // 8 cm, and the rim's face stays level with the tyre's.
+            float width = 0, prof = 0, track = 0;
             if (tweak && tweak->valid) {
-                sc *= tweak->radiusScale[axle];
-                half = tweak->widthOffset[axle];
+                width = tweak->widthOffset[axle];
                 prof = tweak->profileOffset[axle];
-                track = tweak->wheelOffset[axle];
+                track = trackUse[q];
             }
             bool tyre = isTyre(*src);
+            bool marked = width != 0 && widenMarked(*src);
             for (size_t i = 0; i + 2 < m.positions.size(); i += 3) {
                 float lx = m.positions[i], ly = m.positions[i + 1], lz = m.positions[i + 2];
                 if (prof != 0 && tyre) {
@@ -3152,9 +3449,11 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
                         ly *= k; lz *= k;
                     }
                 }
-                float x = lx * sc, z = lz * sc;
-                // the extra tyre width, in metres, split about the tread's middle
-                if (half != 0 && tyre) x += (lx < tyreMid ? -half : half);
+                float x = lx * sx, z = lz * sc;
+                if (width != 0) {
+                    float w = marked ? widenWeight(*src, i / 3) : (tyre && lx > tyreMid ? 1.0f : 0.0f);
+                    x += w * width;         // local +x is inward
+                }
                 x -= track;                 // local -x is outward
                 if (c.right) { x = -x; z = -z; }
                 m.positions[i] = x + offX;
@@ -3207,6 +3506,17 @@ int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius, cons
         car.warnings.push_back(buf);
         if (pushedOut) {
             snprintf(buf, sizeof(buf), "%d wheel(s) moved out to line up with the body side", pushedOut);
+            car.warnings.push_back(buf);
+        }
+        if (tweak && tweak->valid && (tweak->rideHeight[0] != 0 || tweak->rideHeight[1] != 0)) {
+            snprintf(buf, sizeof(buf), "ride height from the car's stock arch: %+.0f mm front, %+.0f mm rear",
+                     tweak->rideHeight[0] * 1000, tweak->rideHeight[1] * 1000);
+            car.warnings.push_back(buf);
+        }
+        if (tweak && tweak->valid && (tweak->wheelOffset[0] != 0 || tweak->wheelOffset[1] != 0)) {
+            snprintf(buf, sizeof(buf), "track from the car's visual parts: %+.0f mm front, %+.0f mm rear a side%s",
+                     tweak->wheelOffset[0] * 1000, tweak->wheelOffset[1] * 1000,
+                     trackCut ? " (cut back to the body side)" : "");
             car.warnings.push_back(buf);
         }
     } else {
@@ -3264,6 +3574,97 @@ bool nlPrefabWheelRadii(const uint8_t* d, size_t n, float radius[2]) {
     if (radius[0] <= 0) radius[0] = radius[1];
     if (radius[1] <= 0) radius[1] = radius[0];
     return got > 0;
+}
+
+// J_chassis in the prefab's tree: the body's joint, its LocalTranslation y
+// the body's height over J_car (the ground the car stands on). The car's
+// .sb3d bakes the same rest pose (0.15 on the Elise and the 911 GT3 RS,
+// 0.119 on the Cayman GT4 - both files agree), so this only matters when the
+// prefab sets the body lower or higher than the model was built.
+bool nlPrefabChassisHeight(const uint8_t* d, size_t n, float& y) {
+    std::string t = sbinObjectsText(d, n);
+    size_t p = t.find("name = \"J_chassis\"");
+    if (p == std::string::npos) return false;
+    size_t end = t.find("name = \"", p + 8);
+    size_t s = t.find("LocalTranslation = Vector3D {", p);
+    if (s == std::string::npos || (end != std::string::npos && s > end)) return false;
+    size_t q = t.find("y = ", s);
+    if (q == std::string::npos) return false;
+    char* e;
+    float v = strtof(t.c_str() + q + 4, &e);
+    if (e == t.c_str() + q + 4 || !(v > -0.5f && v < 1.0f)) return false;
+    y = v;
+    return true;
+}
+
+int nlSetRideHeight(Model& car, float chassisOverCar) {
+    const Hardpoint* jc = nullptr;
+    Hardpoint* jb = nullptr;
+    for (Hardpoint& h : car.points) {
+        if (h.name == "J_car") jc = &h;
+        if (h.name == "J_chassis") jb = &h;
+    }
+    if (!jc || !jb) return 0;
+    float dy = chassisOverCar - (jb->pos[1] - jc->pos[1]);
+    // a few millimetres is rounding; more than 25 cm is not a ride height
+    if (std::fabs(dy) < 0.003f || std::fabs(dy) > 0.25f) return 0;
+    int moved = 0;
+    for (Mesh& m : car.meshes) {
+        std::string n = m.name;
+        for (char& ch : n) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+        // the wheels and brakes stay on the ground; the body moves
+        if (m.part.compare(0, 6, "wheel_") == 0 || n.find("rotor") != std::string::npos ||
+            n.find("caliper") != std::string::npos || n.find("brake_disc") != std::string::npos)
+            continue;
+        for (size_t i = 1; i < m.positions.size(); i += 3) m.positions[i] += dy;
+        m.bboxMin[1] += dy;
+        m.bboxMax[1] += dy;
+        ++moved;
+    }
+    jb->pos[1] += dy;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "body %s %.0f mm to the prefab's ride height (J_chassis %.3f m over J_car)",
+             dy < 0 ? "lowered" : "raised", std::fabs(dy) * 1000, chassisOverCar);
+    car.warnings.push_back(buf);
+    return moved;
+}
+
+// The actor J_wheel_front_left (and rear) in the prefab's tree: its
+// TransformComponent's LocalScale x is how far the game stretches the one
+// wheel model across on that axle (y and z go with WheelRadius).
+bool nlPrefabWheelWidths(const uint8_t* d, size_t n, float width[2], float* height) {
+    width[0] = width[1] = 0;
+    if (height) height[0] = height[1] = 0;
+    std::string t = sbinObjectsText(d, n);
+    static const char* const kName[2][2] = { { "J_wheel_front_left", "J_wheel_front_right" },
+                                             { "J_wheel_rear_left", "J_wheel_rear_right" } };
+    for (int ax = 0; ax < 2; ++ax)
+        for (const char* nm : kName[ax]) {
+            if (width[ax] > 0) break;
+            size_t p = t.find(std::string("name = \"") + nm + "\"");
+            if (p == std::string::npos) continue;
+            // its own components follow the name; the next actor's name ends them
+            size_t end = t.find("name = \"", p + 8);
+            size_t s = t.find("LocalScale = Vector3D {", p);
+            if (s == std::string::npos || (end != std::string::npos && s > end)) continue;
+            size_t x = t.find("x = ", s);
+            if (x == std::string::npos) continue;
+            float v = strtof(t.c_str() + x + 4, nullptr);
+            if (v > 0.3f && v < 3.0f) width[ax] = v;
+            // y: the scale round - the size the game draws the wheel at (the
+            // Elise: 0.868 front, 0.873 rear; its WheelRadius, 0.301 and
+            // 0.317, is the physics' tyre)
+            size_t y = t.find("y = ", x);
+            if (height && y != std::string::npos && (end == std::string::npos || y < end)) {
+                float hv = strtof(t.c_str() + y + 4, nullptr);
+                if (hv > 0.3f && hv < 3.0f) height[ax] = hv;
+            }
+        }
+    if (width[0] <= 0) width[0] = width[1];
+    if (width[1] <= 0) width[1] = width[0];
+    if (height && height[0] <= 0) height[0] = height[1];
+    if (height && height[1] <= 0) height[1] = height[0];
+    return width[0] > 0;
 }
 
 // ---- models a No Limits prefab hangs on the car ----
@@ -3400,6 +3801,101 @@ std::vector<PrefabModel> nlPrefabModels(const uint8_t* d, size_t n) {
     float zero[3] = { 0, 0, 0 };
     visit(u32(at), zero, 0);
     return out;
+}
+
+int nlHangPrefabModel(Model& car, Model& extra, const float pos[3], const std::string& part) {
+    // The light bar's parts have no level in their names, so its loader puts
+    // them on LOD00. A cop car whose finest level is LOD02 (the Viper, the
+    // 911) then listed LOD00 first, the viewer opened on it, and all there
+    // was to see was the light bar's glow cards, hidden by the Lights switch:
+    // "0 polygons, 0 parts". Its levels go onto the car's, finest on finest.
+    int carBest = 99, extraBest = 99;
+    for (const Mesh& m : car.meshes) carBest = std::min(carBest, lodNumber(m));
+    for (const Mesh& m : extra.meshes)
+        if (m.lod != "HELPERS") extraBest = std::min(extraBest, lodNumber(m));
+    int added = 0;
+    for (Mesh& me : extra.meshes) {
+        if (me.lod == "HELPERS") continue;
+        for (size_t k = 0; k + 2 < me.positions.size(); k += 3)
+            for (int a = 0; a < 3; ++a) me.positions[k + a] += pos[a];
+        for (int a = 0; a < 3; ++a) { me.bboxMin[a] += pos[a]; me.bboxMax[a] += pos[a]; }
+        if (carBest < 99 && !me.lod.empty()) {
+            int level = lodNumber(me);
+            level = level < 99 && extraBest < 99 ? carBest + (level - extraBest) : carBest;
+            char b[16];
+            snprintf(b, sizeof(b), "LOD%02d", std::min(level, 99));
+            me.lod = b;
+        }
+        me.part = part;
+        me.kit = 0;
+        me.kitSlot.clear();
+        car.meshes.push_back(std::move(me));
+        ++added;
+    }
+    for (const Material& mt : extra.materials) car.materials.push_back(mt);
+    return added;
+}
+
+std::string nlCopBaseNameFor(const std::string& path) {
+    std::string stem = stripExtension(baseName(path));
+    for (char& c : stem) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (stem.size() > 4 && stem.compare(stem.size() - 4, 4, "_cop") == 0) stem.erase(stem.size() - 4);
+    else if (stem.size() > 4 && stem.compare(0, 4, "cop_") == 0) stem.erase(0, 4);
+    else return std::string();
+    return stem + ".sb3d";
+}
+
+bool nlIsCopAddOnSet(const Model& m) {
+    // Every drivable car, the full cop cars (cop_porsche_911_991,
+    // cop_srt_viper_zd) among them, has its body under the paint shader as
+    // mesh_paint_*; the add-on sets have none, only the parts bolted on.
+    if (!m.valid || m.meshes.empty()) return false;
+    // A fixed-colour paint is not a body: the Defender's cop set paints its
+    // roll cage and bull bar satin black (mesh_paint_satin, material
+    // paint_satin_black_opaque) and still has no car under it.
+    for (const Mesh& me : m.meshes) {
+        if (me.name.compare(0, 10, "mesh_paint") != 0 && me.material.compare(0, 12, "paint_shader") != 0) continue;
+        std::string s = lowerOf(me.name + " " + me.material);
+        bool fixed = s.find("black") != std::string::npos || s.find("satin") != std::string::npos ||
+                     s.find("matte") != std::string::npos || s.find("white") != std::string::npos ||
+                     s.find("chrome") != std::string::npos || s.find("carbon") != std::string::npos;
+        if (!fixed) return false;
+    }
+    return true;
+}
+
+int nlMergeCopOntoBase(Model& cop, Model&& base, const std::string& baseFile) {
+    if (!base.valid || base.meshes.empty()) return 0;
+    // Both files hang their parts on the same rig (J_chassis at the same
+    // height on the i8 and its cop), so the cop's parts are already in place
+    // on the road car's body and go on as they are. They are bolted on rather
+    // than swapped in: the cop's push bar sits inside the road car's rear
+    // bumper, its bull bar ahead of the front one.
+    int kept = 0;
+    for (Mesh& me : cop.meshes) {
+        // on every body kit of the road car
+        if (me.lod != "HELPERS") { me.kit = 0; me.kitSlot.clear(); }
+        base.meshes.push_back(std::move(me));
+        ++kept;
+    }
+    for (const Material& mt : cop.materials) {
+        bool have = false;
+        for (const Material& b : base.materials) if (b.name == mt.name) { have = true; break; }
+        if (!have) base.materials.push_back(mt);
+    }
+    // the cop's own points: where its light bar and flashers go
+    // (locator_prefab_coplights_*); the rig's joints are the road car's
+    for (const Hardpoint& h : cop.points) {
+        bool have = false;
+        for (const Hardpoint& b : base.points) if (b.name == h.name) { have = true; break; }
+        if (!have || h.name.compare(0, 8, "locator_") == 0) base.points.push_back(h);
+    }
+    std::vector<std::string> notes = std::move(cop.warnings);
+    base.warnings.insert(base.warnings.end(), notes.begin(), notes.end());
+    base.warnings.push_back(std::to_string(kept) + " cop part(s) put on " + baseFile +
+                            ", the road car the game draws them with");
+    cop = std::move(base);
+    return kept;
 }
 
 } // namespace nfsnl

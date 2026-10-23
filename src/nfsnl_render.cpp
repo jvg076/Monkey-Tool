@@ -128,7 +128,22 @@ AlphaMode meshAlphaMode(const Mesh& mesh, const AlphaStats* tex, float* alphaSca
     // Parts that are solid whatever their texture's alpha holds: Real Racing
     // 3's tyre tread keeps a mask there (drawn as a cut-out the tyres
     // vanished), and paint, rims and brakes use it for gloss.
-    if (has("blur")) return ALPHA_BLEND;
+    // Body materials the game gives damage and motion-blur variants of (the
+    // Sesto Elemento's whole carbon shell is carbondamageblur) are bodywork,
+    // not a wheel's spin card: "blur" made the car see-through, and the
+    // carbon texture's alpha (gloss) would do the same. Only an "alpha" in
+    // the material makes such a part a cut-out or see-through. Read from the
+    // material: the part's name says where it sits (the carbon round the
+    // Sesto's headlights is mesh_carbon_headlights), not what it is.
+    std::string mt = mesh.material.empty() ? mesh.name : mesh.material;
+    for (char& c : mt) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    auto mtHas = [&](const char* k) { return mt.find(k) != std::string::npos; };
+    bool solidBody = (mtHas("carbon") || mtHas("paint") || mtHas("chrome") || mtHas("chassis")) &&
+                     !mtHas("alpha") && !mtHas("glass") && !mtHas("window") && !mtHas("lens") &&
+                     !mtHas("light") && !mtHas("lamp") && !mtHas("decal") && !mtHas("shadow") &&
+                     !mtHas("wheel") && !mtHas("tyre") && !mtHas("tire");
+    if (has("blur") && !solidBody) return ALPHA_BLEND;
+    if (solidBody) return ALPHA_OPAQUE;
     for (const char* k : { "tyre", "tire", "rubber", "_mm_ext", "_mm_wheel", "_mm_rotor", "_mm_caliper",
                            "_mm_chassis", "_mm_carbon", "paint" })
         if (has(k)) return ALPHA_OPAQUE;

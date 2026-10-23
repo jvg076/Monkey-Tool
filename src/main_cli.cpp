@@ -7,7 +7,6 @@
 #include <vector>
 #include <algorithm>
 
-#include <dirent.h>
 #include <array>
 #include <map>
 #include <functional>
@@ -27,12 +26,12 @@ static int cliRr3Textures(nfsnl::Model& m, const std::string& modelPath, std::st
         if (f) fclose(f);
         return f != nullptr;
     };
+    // std::filesystem rather than dirent.h, which Visual C++ does not have
     auto listDir = [](const std::string& dir) {
         std::vector<std::string> out;
-        DIR* d = opendir(dir.c_str());
-        if (!d) return out;
-        while (dirent* e = readdir(d)) out.push_back(e->d_name);
-        closedir(d);
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(std::filesystem::u8path(dir), ec))
+            out.push_back(e.path().filename().u8string());
         std::sort(out.begin(), out.end());
         return out;
     };
@@ -58,8 +57,8 @@ static int cliRr3Textures(nfsnl::Model& m, const std::string& modelPath, std::st
         for (const std::string& leaf : listDir(root + rel)) {
             if (leaf == "." || leaf == "..") continue;
             std::string r = rel + leaf;
-            DIR* sub = opendir((root + r).c_str());
-            if (sub) { closedir(sub); walk(r + "/", depth + 1); continue; }
+            std::error_code ec;
+            if (std::filesystem::is_directory(std::filesystem::u8path(root + r), ec)) { walk(r + "/", depth + 1); continue; }
             if (!isTex(leaf)) continue;
             std::string st = lower(leaf.substr(0, leaf.find('.')));
             byFolder.emplace(rr3FolderKey(r), r);
@@ -220,6 +219,28 @@ static bool fileExists(const std::string& p) {
     return f != nullptr;
 }
 
+// A No Limits cop model that is only the police parts (bmw_i8_cop.sb3d) put
+// on its road car, found beside it or in the road car's own folder
+// (models/cars/bmw_i8/bmw_i8.sb3d next to models/cars/bmw_i8_cop/). The road
+// car's path in `basePath`, "" when nothing was merged.
+static void cliCopOntoBase(const std::string& in, Model& m, std::string& basePath) {
+    basePath.clear();
+    std::string leaf = nlCopBaseNameFor(in);
+    if (leaf.empty() || !nlIsCopAddOnSet(m)) return;
+    std::string dir = in.substr(0, in.find_last_of("/\\") + 1);
+    std::string up = dir.size() > 1 ? dir.substr(0, dir.find_last_of("/\\", dir.size() - 2) + 1) : dir;
+    for (const std::string& c : { dir + leaf, up + stripExtension(leaf) + "/" + leaf }) {
+        Bytes raw;
+        if (!fileExists(c) || !readFile(c, raw)) continue;
+        if (nlMergeCopOntoBase(m, loadModel(raw.data(), raw.size()), leaf) > 0) {
+            basePath = c;
+            printf("cop parts put on %s\n", c.c_str());
+        }
+        return;
+    }
+    printf("only the cop's parts: %s (the car they go on) is not beside it\n", leaf.c_str());
+}
+
 static void usage() {
     printf(
 "Monkey Tool (command line)\n"
@@ -236,6 +257,8 @@ static void usage() {
 "                (a No Limits car also takes --wheel wheel_<car>.sb3d and\n"
 "                 --kit stock|all|b|c... for one body kit, or every part shown)\n"
 "  nfsnl render  <modelFile>  <outPng>    [opts]       viewer frame to PNG\n"
+"                (a No Limits car hangs wheel_<car>.sb3d from beside it, or --wheel;\n"
+"                 --tyre-radius F R and --tyre-width F R stand in for its prefab / visual parts)\n"
 "  nfsnl browse  <gameFolder> [filter]                 index only, no unpacking\n"
 "  nfsnl where   <gameFolder> <name>                   which .pack an asset is in\n"
 "  nfsnl import  <texture> <picture> <outFile>         put a PNG/JPG into a texture\n"
@@ -338,6 +361,65 @@ static bool cliTyreDiameters(const std::string& modelPath, float out[2]) {
         if (rr3TyreDiameters(plain.data(), plain.size(), id, out)) return true;
     }
     return false;
+}
+
+// A No Limits car's wheel data, as the viewer gathers it from the library:
+// each axle's tyre radius from prefabs/cars/<car>.prefabs.sb (beside models/,
+// or beside the car), and the stock arch's tyre tweaks from
+// data/visualparts/C_<car>_1.sb (or MT_VISUALPARTS). `render` and `one`
+// both hang the wheel with these, so both show the same car.
+static bool cliNlWheelData(const std::string& in, float radii[2], NlWheelTweak& tweak, float widths[2],
+                           float* chassis) {
+    radii[0] = radii[1] = 0;
+    widths[0] = widths[1] = 0;
+    *chassis = -1;
+    tweak = NlWheelTweak();
+    std::string car = stripExtension(baseName(in));
+    std::string dir = in.substr(0, in.find_last_of("/\\") + 1);
+    std::string root = in;
+    for (int up = 0; up < 4; ++up) {
+        size_t sl = root.find_last_of("/\\");
+        root = sl == std::string::npos ? std::string(".") : root.substr(0, sl);
+    }
+    bool have = false;
+    for (const std::string& pf : { root + "/prefabs/cars/" + car + ".prefabs.sb", dir + car + ".prefabs.sb",
+                                   dir + "prefabs/cars/" + car + ".prefabs.sb" }) {
+        Bytes raw, sb;
+        if (readFile(pf, raw) && nlSbDecode(baseName(pf), raw.data(), raw.size(), sb) &&
+            nlPrefabWheelRadii(sb.data(), sb.size(), radii)) {
+            have = true;
+            printf("tyre radius %.3f front, %.3f rear (%s)\n", radii[0], radii[1], pf.c_str());
+            if (nlPrefabWheelWidths(sb.data(), sb.size(), widths))
+                printf("wheel scale across %.3f front, %.3f rear\n", widths[0], widths[1]);
+            if (nlPrefabChassisHeight(sb.data(), sb.size(), *chassis))
+                printf("J_chassis %.3f over J_car\n", *chassis);
+            break;
+        }
+    }
+    std::vector<std::string> cand;
+    if (getenv("MT_VISUALPARTS")) cand.push_back(getenv("MT_VISUALPARTS"));
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(root + "/data/visualparts", ec))
+        if (nlVisualPartsMatches(e.path().filename().string(), car))
+            cand.push_back(e.path().string());
+    for (const std::string& f : cand) {
+        Bytes raw, sb;
+        bool got = false;
+        if (extensionOf(f) == "txt") {
+            // the file as the tool's text
+            if (readFile(f, raw)) got = nlVisualPartsWheelTweakText(std::string(raw.begin(), raw.end()), tweak);
+        } else {
+            got = readFile(f, raw) && nlSbDecode(baseName(f), raw.data(), raw.size(), sb) &&
+                  nlVisualPartsWheelTweak(sb.data(), sb.size(), tweak);
+        }
+        if (got) {
+            printf("stock arch: tyre width +%.3f / +%.3f, track %+.3f / %+.3f, ride height %+.3f / %+.3f (%s)\n",
+                   tweak.widthOffset[0], tweak.widthOffset[1], tweak.wheelOffset[0], tweak.wheelOffset[1],
+                   tweak.rideHeight[0], tweak.rideHeight[1], f.c_str());
+            break;
+        }
+    }
+    return have;
 }
 
 // the outside wheel centred where the cockpit's own wheel sits
@@ -1165,20 +1247,31 @@ int main(int argc, char** argv) {
         // or named with --wheel
         if (extensionOf(in) == "sb3d" && (fmt == "fbx" || fmt == "obj" || fmt == "glb") &&
             baseName(in).compare(0, 6, "wheel_") != 0) {
+            Model car = loadModel(data.data(), data.size());
+            // a cop add-on set goes on its road car, whose wheel it then takes
+            std::string basePath;
+            if (car.valid) cliCopOntoBase(in, car, basePath);
             if (wheelPath.empty()) {
                 std::string dir = in.substr(0, in.find_last_of("/\\") + 1);
-                std::string guess = dir + nlWheelNameFor(in);
-                FILE* f = fopen(guess.c_str(), "rb");
-                if (f) { fclose(f); wheelPath = guess; }
+                std::vector<std::string> guesses = { dir + nlWheelNameFor(in) };
+                if (!basePath.empty()) {
+                    guesses.push_back(dir + nlWheelNameFor(basePath));
+                    guesses.push_back(basePath.substr(0, basePath.find_last_of("/\\") + 1) + nlWheelNameFor(basePath));
+                }
+                for (const std::string& guess : guesses)
+                    if (fileExists(guess)) { wheelPath = guess; break; }
             }
             Bytes wb;
             bool haveWheel = !wheelPath.empty() && readFile(wheelPath, wb);
-            if (haveWheel || !kit.empty()) {
-                Model car = loadModel(data.data(), data.size());
+            if (haveWheel || !kit.empty() || !basePath.empty()) {
                 int hung = 0;
                 if (car.valid && haveWheel) {
                     Model wheel = loadModel(wb.data(), wb.size());
-                    hung = nlAttachWheels(car, wheel);
+                    float radii[2], widths[2], chassis;
+                    NlWheelTweak tweak;
+                    bool have = cliNlWheelData(in, radii, tweak, widths, &chassis);
+                    if (chassis >= 0) nlSetRideHeight(car, chassis);
+                    hung = nlAttachWheels(car, wheel, have ? radii : nullptr, &tweak, widths[0] > 0 ? widths : nullptr);
                 }
                 // --kit stock | all | b, c ...: that body kit only (all: every part, all shown)
                 if (car.valid && !kit.empty())
@@ -1363,6 +1456,7 @@ int main(int argc, char** argv) {
         float posX = 0, posY = 0, posZ = 0;
         bool haveYaw = false, havePitch = false, haveCentre = false;
         float yawDeg = 0, pitchDeg = 0, dist = 0, centreAt[3] = {0, 0, 0};
+        float tyreRadius[2] = { 0, 0 }, tyreWidth[2] = { 0, 0 };   // No Limits: in place of the prefab / visual parts
         for (int i = 4; i < argc; ++i) {
             std::string a = argv[i];
             auto next = [&](int n) { return i + n < argc ? (float)atof(argv[i + n]) : 0.0f; };
@@ -1386,6 +1480,8 @@ int main(int argc, char** argv) {
             else if (a == "--hide" && i + 1 < argc) { hideParts.push_back(argv[++i]); }
             else if (a == "--twosided") view.twoSided = true;
             else if (a == "--wheel" && i + 1 < argc) { renderWheel = argv[++i]; }
+            else if (a == "--tyre-radius" && i + 2 < argc) { tyreRadius[0] = next(1); tyreRadius[1] = next(2); i += 2; }
+            else if (a == "--tyre-width" && i + 2 < argc) { tyreWidth[0] = next(1); tyreWidth[1] = next(2); i += 2; }
             else if (a == "--anim" && i + 1 < argc) { animT = (float)atof(argv[++i]); }
             else if (a == "--layout" && i + 1 < argc) { layoutFile = argv[++i]; }
             else if (a == "--setup" && i + 1 < argc) { setupFile = argv[++i]; }
@@ -1394,6 +1490,8 @@ int main(int argc, char** argv) {
         Bytes data;
         if (!readFile(in, data)) { printf("cannot read %s\n", in.c_str()); return 1; }
         Model m = loadModel(data.data(), data.size());
+        std::string copBasePath;    // a cop add-on set: the road car it went on
+        if (m.valid && extensionOf(in) == "sb3d") cliCopOntoBase(in, m, copBasePath);
         if (!hideParts.empty()) {
             std::vector<Mesh> keep;
             for (Mesh& me : m.meshes) {
@@ -1413,56 +1511,38 @@ int main(int argc, char** argv) {
             for (Mesh& me : m.meshes)
                 for (size_t k = 1; k < me.uvs.size(); k += 2) me.uvs[k] = 1.0f - me.uvs[k];
         if (!m.valid || m.meshes.empty()) { printf("no meshes in %s\n", in.c_str()); return 1; }
+        // a No Limits car: its wheel_<car>.sb3d beside it, as `one` finds it
+        if (renderWheel.empty() && extensionOf(in) == "sb3d" && baseName(in).compare(0, 6, "wheel_") != 0) {
+            std::string guess = in.substr(0, in.find_last_of("/\\") + 1) + nlWheelNameFor(in);
+            if (fileExists(guess)) renderWheel = guess;
+            // a cop set takes its road car's wheel
+            if (renderWheel.empty() && !copBasePath.empty()) {
+                for (const std::string& g : { in.substr(0, in.find_last_of("/\\") + 1) + nlWheelNameFor(copBasePath),
+                                              copBasePath.substr(0, copBasePath.find_last_of("/\\") + 1) +
+                                                  nlWheelNameFor(copBasePath) })
+                    if (fileExists(g)) { renderWheel = g; break; }
+            }
+        }
         if (!renderWheel.empty()) {
             Bytes wb;
             bool joints = false;     // NFS Edge's .m3g cars carry J_wheel_* joints too
             for (const Hardpoint& h : m.points) if (h.name.rfind("J_wheel_", 0) == 0) joints = true;
             if ((extensionOf(in) == "sb3d" || joints) && readFile(renderWheel, wb)) {
                 Model wheel = loadModel(wb.data(), wb.size());
-                // prefabs/cars/<car>.prefabs.sb, beside models/ (models/cars/<car>/<car>.sb3d)
-                float radii[2] = { 0, 0 };
-                bool have = false;
-                {
-                    std::string car = stripExtension(baseName(in));
-                    std::string root = in;
-                    for (int up = 0; up < 4; ++up) {
-                        size_t sl = root.find_last_of("/\\");
-                        root = sl == std::string::npos ? std::string(".") : root.substr(0, sl);
-                    }
-                    Bytes raw, sb;
-                    std::string pf = root + "/prefabs/cars/" + car + ".prefabs.sb";
-                    if (readFile(pf, raw) && nlSbDecode(baseName(pf), raw.data(), raw.size(), sb) &&
-                        nlPrefabWheelRadii(sb.data(), sb.size(), radii)) {
-                        have = true;
-                        printf("tyre radius %.3f front, %.3f rear (%s)\n", radii[0], radii[1], pf.c_str());
-                    }
-                }
-                // data/visualparts/C_<car>_1.sb: the stock arch's tyre width and radius tweaks
+                float radii[2], widths[2], chassis;
                 NlWheelTweak tweak;
-                {
-                    std::string car = stripExtension(baseName(in));
-                    std::string root = in;
-                    for (int up = 0; up < 4; ++up) {
-                        size_t sl = root.find_last_of("/\\");
-                        root = sl == std::string::npos ? std::string(".") : root.substr(0, sl);
-                    }
-                    std::vector<std::string> cand;
-                    if (getenv("MT_VISUALPARTS")) cand.push_back(getenv("MT_VISUALPARTS"));
-                    std::error_code ec;
-                    for (auto& e : std::filesystem::directory_iterator(root + "/data/visualparts", ec))
-                        if (nlVisualPartsMatches(e.path().filename().string(), car))
-                            cand.push_back(e.path().string());
-                    for (const std::string& f : cand) {
-                        Bytes raw, sb;
-                        if (readFile(f, raw) && nlSbDecode(baseName(f), raw.data(), raw.size(), sb) &&
-                            nlVisualPartsWheelTweak(sb.data(), sb.size(), tweak)) {
-                            printf("tyre width +%.3f front, +%.3f rear (%s)\n", tweak.widthOffset[0],
-                                   tweak.widthOffset[1], f.c_str());
-                            break;
-                        }
-                    }
+                bool have = cliNlWheelData(in, radii, tweak, widths, &chassis);
+                if (chassis >= 0) nlSetRideHeight(m, chassis);
+                // --tyre-radius / --tyre-width: a prefab's radius or a visual
+                // parts width tried without the file
+                if (tyreRadius[0] > 0) {
+                    radii[0] = tyreRadius[0]; radii[1] = tyreRadius[1]; have = true;
                 }
-                printf("%d wheel(s) placed\n", nlAttachWheels(m, wheel, have ? radii : nullptr, &tweak));
+                if (tyreWidth[0] != 0 || tyreWidth[1] != 0) {
+                    tweak.widthOffset[0] = tyreWidth[0]; tweak.widthOffset[1] = tyreWidth[1]; tweak.valid = true;
+                }
+                printf("%d wheel(s) placed\n", nlAttachWheels(m, wheel, have ? radii : nullptr, &tweak,
+                                                          widths[0] > 0 ? widths : nullptr));
                 if (getenv("MT_PREFAB")) {
                     Bytes raw, sb;
                     if (readFile(getenv("MT_PREFAB"), raw) &&

@@ -1,5 +1,5 @@
 # =====================================================================
-#  Monkey Tool 1.3.1 - automatic Windows build
+#  Monkey Tool 1.3.5 - automatic Windows build
 #
 #  You do NOT need Visual Studio, CMake or anything else installed.
 #  If no compiler is found this downloads w64devkit (a portable MinGW
@@ -43,7 +43,7 @@ public static extern bool SetConsoleMode(IntPtr h, uint m);
 } catch {}
 
 Say ""
-Say "  Monkey Tool 1.3.1 - build" "Cyan"
+Say "  Monkey Tool 1.3.5 - build" "Cyan"
 Say "  ========================"  "Cyan"
 Say ""
 

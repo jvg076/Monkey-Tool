@@ -3598,9 +3598,53 @@ static bool findNlWheelModel(const std::string& carPath, nfsnl::Model& out) {
         if (lower(nfsnl::baseName(g_all[i].path)) != want) continue;
         if (best < 0 || g_all[i].path.compare(0, dir.size(), dir) == 0) best = (int)i;
     }
-    // No wheel under the car's exact name: the closest one by name, token by
-    // token from the front - make and model at least, so honda_s2000_gt
-    // takes wheel_honda_s2000 but never another make's wheel.
+    // No wheel under the car's own name (the Agera RS, the Polestar 1): the
+    // wheel its own data names - the stock setup (car_setups/<car>/), its
+    // visual parts and its prefab - read for any wheel_<x> / rim_<x> that is
+    // a wheel model in the library.
+    std::string standIn;
+    if (best < 0) {
+        std::string car = lower(nfsnl::stripExtension(nfsnl::baseName(carPath)));
+        std::map<std::string, int> wheels;     // wheel_x (no extension) -> entry
+        for (size_t i = 0; i < g_all.size(); ++i) {
+            std::string leaf = lower(nfsnl::baseName(g_all[i].path));
+            if (leaf.compare(0, 6, "wheel_") == 0 && nfsnl::extensionOf(leaf) == "sb3d")
+                wheels.emplace(nfsnl::stripExtension(leaf), (int)i);
+        }
+        std::vector<std::string> names;
+        for (size_t i = 0; i < g_all.size() && best < 0; ++i) {
+            std::string q = lower(g_all[i].path);
+            if (nfsnl::extensionOf(q) != "sb") continue;
+            bool mine = q.find("car_setups/" + car + "/") != std::string::npos ||
+                        q.find("prefabs/cars/" + car + ".prefabs.sb") != std::string::npos ||
+                        (q.find("visualparts/") != std::string::npos &&
+                         nfsnl::nlVisualPartsMatches(nfsnl::baseName(q), car));
+            if (!mine) continue;
+            Bytes raw, sb;
+            if (!readAsset(g_all[i], raw)) continue;
+            // (the file's own spelling: the name is the key)
+            if (!nfsnl::nlSbDecode(nfsnl::baseName(g_all[i].path), raw.data(), raw.size(), sb)) sb = raw;
+            std::string text(sb.begin(), sb.end());
+            text = lower(text);
+            for (const char* key : { "wheel_", "rim_" }) {
+                size_t k = 0, kl = strlen(key);
+                while ((k = text.find(key, k)) != std::string::npos) {
+                    size_t e = k + kl;
+                    while (e < text.size() && ((text[e] >= 'a' && text[e] <= 'z') ||
+                                               (text[e] >= '0' && text[e] <= '9') || text[e] == '_'))
+                        ++e;
+                    std::string name = "wheel_" + text.substr(k + kl, e - k - kl);
+                    auto hit = wheels.find(name);
+                    if (hit != wheels.end()) { best = hit->second; break; }
+                    k = e;
+                }
+                if (best >= 0) break;
+            }
+        }
+    }
+    // Else the closest one by name, token by token from the front - make
+    // and model at least, so honda_s2000_gt takes wheel_honda_s2000 but
+    // never another make's wheel.
     if (best < 0) {
         auto tokens = [](const std::string& x) {
             std::vector<std::string> t;
@@ -3623,6 +3667,18 @@ static bool findNlWheelModel(const std::string& carPath, nfsnl::Model& out) {
             while (k < w.size() && k < car.size() && w[k] == car[k]) ++k;
             if (k > bestScore) { bestScore = k; best = (int)i; }
         }
+        // last of all one of the same make, said to be a stand-in: a car
+        // shown without wheels looks broken, one on its make's wheel only
+        // approximate
+        if (best < 0) {
+            for (size_t i = 0; i < g_all.size() && best < 0; ++i) {
+                std::string leaf = lower(nfsnl::baseName(g_all[i].path));
+                if (leaf.compare(0, 6, "wheel_") || nfsnl::extensionOf(leaf) != "sb3d") continue;
+                std::vector<std::string> w = tokens(nfsnl::stripExtension(leaf.substr(6)));
+                if (!w.empty() && !car.empty() && w[0] == car[0] && w[0].size() > 2) best = (int)i;
+            }
+            if (best >= 0) standIn = nfsnl::baseName(g_all[best].path);
+        }
     }
     if (best < 0) return false;
     logLine("wheels for %s: %s", carPath.c_str(), g_all[best].path.c_str());
@@ -3634,7 +3690,9 @@ static bool findNlWheelModel(const std::string& carPath, nfsnl::Model& out) {
     // traced to its pack
     std::string src = sourceFileOf(g_all[best]);
     out.warnings.insert(out.warnings.begin(), "wheel: " + nfsnl::baseName(g_all[best].path) +
-                        (src.empty() ? std::string() : " from " + nfsnl::baseName(src)));
+                        (src.empty() ? std::string() : " from " + nfsnl::baseName(src)) +
+                        (standIn.empty() ? std::string()
+                                         : " - a stand-in of the same make: no wheel of this car's own was found"));
     return true;
 }
 
@@ -3971,6 +4029,26 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
     }
     if (nfsnl::extensionOf(path) == "sb3d" &&
         nfsnl::baseName(path).compare(0, 6, "wheel_") != 0) {
+        // A cop model that is only the police parts (bmw_i8_cop.sb3d: roll
+        // cage, bull bar, push bar) goes on its road car, as the game draws
+        // it; alone it showed as a frame with no body.
+        std::string wheelFor = path;
+        std::string copBase = nfsnl::nlCopBaseNameFor(path);
+        if (!copBase.empty() && nfsnl::nlIsCopAddOnSet(m)) {
+            std::string stem = nfsnl::stripExtension(copBase);
+            std::string dir = path.substr(0, path.find_last_of('/') + 1);
+            std::string up = dir.size() > 1 ? dir.substr(0, dir.find_last_of('/', dir.size() - 2) + 1) : dir;
+            // models/cars/<car>/<car>.sb3d beside the cop's folder, else the
+            // same name anywhere in the library
+            int bi = findAssetOne(up + stem + "/" + copBase);
+            Bytes raw;
+            if (bi >= 0 && nfsnl::baseName(g_all[bi].path) == copBase && readAsset(g_all[bi], raw)) {
+                nfsnl::Model base = nfsnl::loadSb3d(raw.data(), raw.size());
+                if (nfsnl::nlMergeCopOntoBase(m, std::move(base), copBase) > 0) wheelFor = g_all[bi].path;
+            } else {
+                m.warnings.push_back("only the cop's parts: " + copBase + ", the car they go on, is not in the library");
+            }
+        }
         // the car's prefab: the tyre size the game gives the wheel, and the
         // models it hangs on the car (a cop car's light bar)
         Bytes prefab;
@@ -4006,27 +4084,21 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
                                          (extra.warnings.empty() ? std::string() : ": " + extra.warnings[0]));
                     continue;
                 }
-                for (nfsnl::Mesh& me : extra.meshes) {
-                    if (me.lod == "HELPERS") continue;
-                    for (size_t k = 0; k + 2 < me.positions.size(); k += 3)
-                        for (int a = 0; a < 3; ++a) me.positions[k + a] += pm.pos[a];
-                    for (int a = 0; a < 3; ++a) { me.bboxMin[a] += pm.pos[a]; me.bboxMax[a] += pm.pos[a]; }
-                    me.part = nfsnl::stripExtension(nfsnl::baseName(ref));
-                    me.kit = 0;
-                    me.kitSlot.clear();
-                    m.meshes.push_back(std::move(me));
-                }
-                for (const nfsnl::Material& mt : extra.materials) m.materials.push_back(mt);
+                nfsnl::nlHangPrefabModel(m, extra, pm.pos, nfsnl::stripExtension(nfsnl::baseName(ref)));
                 ++hung;
                 m.warnings.push_back(nfsnl::baseName(ref) + " hung on the car where its prefab puts it");
             }
             (void)hung;
         }
         nfsnl::Model wheel;
-        if (findNlWheelModel(path, wheel)) {
+        if (findNlWheelModel(wheelFor, wheel)) {
             if (!wheel.warnings.empty()) m.warnings.push_back(wheel.warnings.front());
             float radii[2] = { 0, 0 };
             bool haveRadii = !prefab.empty() && nfsnl::nlPrefabWheelRadii(prefab.data(), prefab.size(), radii);
+            // the prefab's J_wheel_* scale across (the GT3 RS's 335 rear tyres)
+            float widths[2] = { 0, 0 };
+            float rounds[2] = { 0, 0 };
+            bool haveWidths = !prefab.empty() && nfsnl::nlPrefabWheelWidths(prefab.data(), prefab.size(), widths, rounds);
             // data/visualparts/C_<car>_1.sb: how the stock arch widens the tyre
             nfsnl::NlWheelTweak tweak;
             {
@@ -4042,10 +4114,15 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
                         nfsnl::nlVisualPartsWheelTweak(sb.data(), sb.size(), tweak);
                 }
             }
-            nfsnl::nlAttachWheels(m, wheel, haveRadii ? radii : nullptr, &tweak);
+            // the body at the prefab's own ride height, should it differ from the model's
+            float chassis = 0;
+            if (!prefab.empty() && nfsnl::nlPrefabChassisHeight(prefab.data(), prefab.size(), chassis))
+                nfsnl::nlSetRideHeight(m, chassis);
+            nfsnl::nlAttachWheels(m, wheel, haveRadii ? radii : nullptr, &tweak, haveWidths ? widths : nullptr,
+                                  rounds[0] > 0 ? rounds : nullptr);
             if (tweak.valid && (tweak.widthOffset[0] != 0 || tweak.widthOffset[1] != 0)) {
                 char b[160];
-                snprintf(b, sizeof(b), "tyres widened as the car's visual parts say: +%.0f mm front, +%.0f mm rear",
+                snprintf(b, sizeof(b), "tyres widened inwards as the car's visual parts say: +%.0f mm front, +%.0f mm rear",
                          tweak.widthOffset[0] * 1000, tweak.widthOffset[1] * 1000);
                 m.warnings.push_back(b);
             }
@@ -4053,6 +4130,16 @@ static void applySidecars(nfsnl::Model& m, const std::string& path,
                 char b[160];
                 snprintf(b, sizeof(b), "tyre radius from the car's prefab: %.3f m front, %.3f m rear",
                          radii[0], radii[1]);
+                m.warnings.push_back(b);
+            }
+            if (haveWidths) {
+                char b[160];
+                if (rounds[0] > 0)
+                    snprintf(b, sizeof(b), "wheel scale from the car's prefab: x%.2f across, x%.2f round front; x%.2f, x%.2f rear",
+                             widths[0], rounds[0], widths[1], rounds[1]);
+                else
+                    snprintf(b, sizeof(b), "wheel width from the car's prefab: x%.2f front, x%.2f rear",
+                             widths[0], widths[1]);
                 m.warnings.push_back(b);
             }
         }
@@ -5950,6 +6037,36 @@ static void fillEntryTimes() {
     }
 }
 
+// An update leaves an asset in a new .pack while the old pack, with the old
+// copy under the same path, stays on the device (No Limits names its packs by
+// hash, so the new one does not replace the old file). Both were listed - two
+// aston_martin_valkyrie_amr_pro.sb3d in one folder. The game reads the newer
+// one, so the newer archive's copy stays and the other goes; on equal dates
+// the archive read last wins.
+static void dropSupersededCopies() {
+    std::map<std::string, size_t> keep;               // lower-case path -> index into g_all
+    std::vector<bool> drop(g_all.size(), false);
+    for (size_t i = 0; i < g_all.size(); ++i) {
+        std::string k = g_all[i].path;
+        for (char& c : k) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        auto it = keep.find(k);
+        if (it == keep.end()) { keep.emplace(k, i); continue; }
+        size_t j = it->second;
+        bool newer = g_all[i].time > g_all[j].time ||
+                     (g_all[i].time == g_all[j].time && g_all[i].lib > g_all[j].lib);
+        if (newer) { drop[j] = true; it->second = i; }
+        else drop[i] = true;
+    }
+    size_t w = 0, gone = 0;
+    for (size_t i = 0; i < g_all.size(); ++i) {
+        if (drop[i]) { ++gone; continue; }
+        if (w != i) g_all[w] = std::move(g_all[i]);
+        ++w;
+    }
+    g_all.resize(w);
+    if (gone) logLine("indexing: %u older copy(ies) of updated assets left out", (unsigned)gone);
+}
+
 // Every asset of a loose-file game, indexed straight off the folder.
 static void indexLooseGame(std::string folder) {
     std::vector<std::pair<std::string, std::string>> files;
@@ -6095,6 +6212,7 @@ static void indexWorkerBody(std::string folder) {
     }
     nameLooseSounds();
     fillEntryTimes();
+    dropSupersededCopies();
     // the caller clears g_busy and posts WM_APP_DONE, once, whatever happens
 }
 
@@ -6186,7 +6304,7 @@ static void paintSplash(HWND hwnd, HDC target) {
     SelectObject(dc, mid);
     SetTextColor(dc, RGB(0xB8, 0xB8, 0xC0));
     TextOutW(dc, 168, 120, L"by GM25", 7);
-    TextOutW(dc, 36, 196, L"1.3.1", 5);
+    TextOutW(dc, 36, 196, L"1.3.5", 5);
     if (g_profile) {
         std::wstring gn = widen(g_profile->name);
         TextOutW(dc, 36, 218, gn.c_str(), (int)gn.size());
@@ -6556,7 +6674,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                      WS_CHILD, 0, 0, 100, 16, hwnd,
                                      (HMENU)IDC_PROGRESS, g_inst, nullptr);
         SendMessageW(g_progress, PBM_SETRANGE32, 0, 1000);
-        g_status = CreateWindowExW(0, L"STATIC", L"Monkey Tool 1.3.1 - choose a game to begin.",
+        g_status = CreateWindowExW(0, L"STATIC", L"Monkey Tool 1.3.5 - choose a game to begin.",
                                    WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
                                    0, 0, 100, 20, hwnd, (HMENU)IDC_STATUS, g_inst, nullptr);
         // viewer controls; hidden until a model is selected
@@ -7378,7 +7496,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case ID_HELP_ABOUT:
             MessageBoxW(hwnd,
-                L"Monkey Tool 1.3.1\n\n"
+                L"Monkey Tool 1.3.5\n\n"
                 L"Games: NFS No Limits, No Limits VR, Edge, Most Wanted,\n"
                 L"Hot Pursuit; Real Racing Next, 3, 2, Real Racing and GTI.\n\n"
                 L"Need for Speed: No Limits - unpacks the .pack archives and\n"
@@ -7693,7 +7811,7 @@ static void paintPicker(HWND hwnd, HDC target) {
     SelectObject(hdc, small);
     SetTextColor(hdc, dim);
     RECT vr{kPickSide + 110, rc.bottom - kPickFooter, rc.right - kPickSide - 110, rc.bottom};
-    DrawTextW(hdc, L"Monkey Tool 1.3.1 by GM25", -1, &vr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(hdc, L"Monkey Tool 1.3.5 by GM25", -1, &vr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     SelectObject(hdc, oldFont);
     DeleteObject(title);
@@ -7921,7 +8039,7 @@ static void openGameBody(HWND hwnd, bool askProfile) {
         }
     }
     g_gameFolder = folder;
-    std::wstring caption = L"Monkey Tool 1.3.1 - " + widen(g_profile->name);
+    std::wstring caption = L"Monkey Tool 1.3.5 - " + widen(g_profile->name);
     SetWindowTextW(hwnd, caption.c_str());
     setStatus("");
     startIndexThread(folder);
@@ -8310,7 +8428,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
                     L"Monkey Tool", MB_ICONERROR);
         ExitProcess(3);
     });
-    logLine("---- Monkey Tool 1.3.1 starting ----");
+    logLine("---- Monkey Tool 1.3.5 starting ----");
     findLzham();
     logLine("codecs: zstd %s, LZHAM %s",
             nfsnl::zstdAvailable() ? "yes" : "missing",
@@ -8334,7 +8452,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     wc.lpszClassName = L"MonkeyTool";
     RegisterClassExW(&wc);
 
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"Monkey Tool 1.3.1",
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"Monkey Tool 1.3.5",
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                              1100, 700, nullptr, nullptr, inst, nullptr);
     // also set them on the window itself - a class icon alone is not always
@@ -8447,7 +8565,7 @@ static void updateToolbarState() {
     if (g_tbMod) EnableWindow(g_tbMod, rr3 && !g_busy ? TRUE : FALSE);
     if (g_tbPoints) EnableWindow(g_tbPoints, rr3 && !g_busy ? TRUE : FALSE);
     if (g_main) {
-        std::wstring caption = L"Monkey Tool 1.3.1";
+        std::wstring caption = L"Monkey Tool 1.3.5";
         if (g_profile) caption += L" - " + widen(g_profile->name);
         if (!g_pending.empty()) caption += L"  *";
         SetWindowTextW(g_main, caption.c_str());
@@ -9445,6 +9563,7 @@ static void lvSetText(HWND lv, int row, int sub, const std::wstring& text) {
     SendMessageW(lv, kLvmSetItemTextW, (WPARAM)row, (LPARAM)&it);
 }
 static int lvSelected(HWND lv) { return (int)SendMessageW(lv, kLvmGetNextItem, (WPARAM)-1, LVNI_SELECTED); }
+
 
 static std::string ccField(const std::string& key) {
     for (const nfsnl::Rr3CarField& f : g_ccFields) if (f.key == key) return f.value;

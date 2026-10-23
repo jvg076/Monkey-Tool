@@ -1098,15 +1098,21 @@ void poseModel(Model& m, float t);
 // How the car's stock wheel arch fits the wheel, per axle ([0] front, [1]
 // rear), from data/visualparts/C_<car>_1.sb (WheelArchUpgrade): the tyre is
 // widened by TireWidthOffset (the Beck Kustoms F132 runs +6 cm front, +11 cm
-// rear on one wheel model) and the radius scaled by WheelRadiusScale.
+// rear on one wheel model) and the radius scaled by WheelRadiusScale. The
+// width is added once, on the inner side: the wheel model marks the vertices
+// that move with it (pure blue vertex colour - the tyre's inner half and the
+// rim barrel's inner lip), so the rim face and the tyre's outer wall stay put.
 struct NlWheelTweak {
     float widthOffset[2] = { 0, 0 };
     float radiusScale[2] = { 1, 1 };
     float profileOffset[2] = { 0, 0 };
     float wheelOffset[2] = { 0, 0 };     // the whole wheel further out (m)
+    float rideHeight[2] = { 0, 0 };      // the body raised over the wheel (m)
     bool valid = false;
 };
 bool nlVisualPartsWheelTweak(const uint8_t* sbin, size_t n, NlWheelTweak& out);
+// the same from the file as the tool's text (Tools > text, File > Save as)
+bool nlVisualPartsWheelTweakText(const std::string& text, NlWheelTweak& out);
 // does a visualparts file name (C_Acura_NSX_Type_S_2022_1.sb) belong to the car id
 // (acura_nsx_type_s_2022)? The words must match, in any order.
 bool nlVisualPartsMatches(const std::string& visualPartsFile, const std::string& carId);
@@ -1153,14 +1159,45 @@ bool nlRimTintMask(const Model& wheel, const std::string& textureLeaf, int w, in
 // the paint: each masked texel times the colour (an empty mask: every grey
 // texel, the colourful logos left alone)
 void nlTintImage(Image& img, const std::vector<uint8_t>& mask, const float rgb[3]);
+// axleRadius: each axle's tyre radius (the prefab's WheelRadius); axleWidth:
+// how much the wheel model is stretched across on each axle (the prefab's
+// J_wheel_* LocalScale x). Without them the car's own J_wheel_* joint scale
+// is used.
+// axleScale: the prefab's J_wheel_* LocalScale y, the size round the game
+// draws the wheel model at; it wins over axleRadius for the look.
 int nlAttachWheels(Model& car, const Model& wheel, const float* axleRadius = nullptr,
-                   const NlWheelTweak* tweak = nullptr);
+                   const NlWheelTweak* tweak = nullptr, const float* axleWidth = nullptr,
+                   const float* axleScale = nullptr);
 // the tyre radius per axle from a car's decoded prefab SBIN ([0] front, [1] rear)
 bool nlPrefabWheelRadii(const uint8_t* d, size_t n, float radius[2]);
+// the wheel model's scale across ([0] front, [1] rear) from a car's decoded
+// prefab SBIN: J_wheel_front_left / J_wheel_rear_left LocalScale x (the
+// 911 GT3 RS: 1.1 front, 1.34 rear - its 275 and 335 tyres)
+bool nlPrefabWheelWidths(const uint8_t* d, size_t n, float width[2], float* height = nullptr);
+// the body's height over the ground from a car's decoded prefab SBIN: J_chassis
+// LocalTranslation y (its place under J_car, the ground)
+bool nlPrefabChassisHeight(const uint8_t* d, size_t n, float& y);
+// moves the body (not the wheels or brakes) so J_chassis sits chassisOverCar
+// above J_car, as the prefab says; returns the meshes moved (0: no change)
+int nlSetRideHeight(Model& car, float chassisOverCar);
 // the models a car's prefab hangs on it (a cop car's light bar), each with
 // its place on the car (the actors' translations added up)
 struct PrefabModel { std::string file; float pos[3] = { 0, 0, 0 }; };
 std::vector<PrefabModel> nlPrefabModels(const uint8_t* sbin, size_t n);
+// one such model hung on the car at `pos`: its parts named `part`, no body
+// kit, its helpers left out and its detail levels moved onto the car's (its
+// finest on the car's finest). Returns the parts added.
+int nlHangPrefabModel(Model& car, Model& extra, const float pos[3], const std::string& part);
+// A police add-on set: bmw_i8_cop.sb3d holds only the cop's parts (roll
+// cage, bull bar, push bar, light bar brackets) on the rig of bmw_i8.sb3d,
+// which the game draws them with. The road car's file name for a cop model
+// ("bmw_i8.sb3d" for bmw_i8_cop.sb3d or cop_bmw_i8.sb3d), "" for any other.
+std::string nlCopBaseNameFor(const std::string& path);
+// true when a model is such a set: parts, but no painted body of its own
+bool nlIsCopAddOnSet(const Model& m);
+// the road car with the cop's parts in their place: `cop` becomes `base`
+// plus its own parts (and points). Returns the cop parts kept.
+int nlMergeCopOntoBase(Model& cop, Model&& base, const std::string& baseName);
 // the wheel model a No Limits car uses, by its path: models/cars/x/x.sb3d ->
 // "wheel_x.sb3d"
 std::string nlWheelNameFor(const std::string& carPath);
@@ -1517,5 +1554,6 @@ bool convertAssetWithSettings(const std::string& path, const uint8_t* data, size
                               const ExportSettings& s, Bytes& out, std::string& ext,
                               std::string* err = nullptr, bool* needsFfmpeg = nullptr,
                               const uint8_t* sidecar = nullptr, size_t sidecarLen = 0);
+
 
 } // namespace nfsnl

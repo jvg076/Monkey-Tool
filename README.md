@@ -178,6 +178,7 @@ The tool has its own code for DEFLATE, PNG (including Apple's iPhone PNGs), JPEG
    * **Quick edit** has the usual fields: cash, gold, level, fuel and so on
      for No Limits; R$, Gold, M$ and driver level for Real Racing 3.
    * **All fields** lists everything in the save, with a search box.
+   * **VIP stage / level** (No Limits): in Quick edit when the save keeps one.
    * **Premium / VIP player**: a tick beside the player's name turns on (or off) every yes/no
      flag in the save whose name says VIP, premium or subscriber. The flags are found by name,
      so the box is greyed out when a save holds none; the list under "All fields" shows them.

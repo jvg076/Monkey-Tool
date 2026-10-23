@@ -54,6 +54,10 @@ jobs:
           if ($z) { Copy-Item $z.FullName dist/licenses/zstd-LICENSE.txt }
           Copy-Item src/lzham/LICENSE dist/licenses/lzham-LICENSE.txt
           Copy-Item src/brotli/LICENSE dist/licenses/brotli-LICENSE.txt
+          Copy-Item src/thirdparty/miniz/LICENSE dist/licenses/miniz-LICENSE.txt
+          Copy-Item src/thirdparty/bc7enc/LICENSE dist/licenses/bc7enc-LICENSE.txt
+          Copy-Item src/thirdparty/ogg/COPYING dist/licenses/libogg-COPYING.txt
+          Copy-Item src/thirdparty/vorbis/COPYING dist/licenses/libvorbis-COPYING.txt
           Get-ChildItem -Recurse dist
 
       - name: Version
@@ -98,4 +102,5 @@ jobs:
       - run: cmake -B build && cmake --build build
       - run: ./build/monkeytool_cli || true
       - name: Syntax-check the Windows sources
-        run: ./tests/check_windows_syntax.sh
+        # through bash: a checkout from a zip upload keeps no execute bit
+        run: bash tests/check_windows_syntax.sh
